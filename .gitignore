@@ -1,0 +1,4 @@
+.test-tmp/
+.smoke-home/
+.smoke-*
+node_modules/

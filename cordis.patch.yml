@@ -1,0 +1,23 @@
+# dsh-session-relocate —— 对话跨工作区移动
+#
+# 把某个 Session 的日志（含全部历史 generation）与工作区归属，作为一个
+# 可恢复事务整体搬到另一个工作区。
+#
+# 主机侧：/api/dsh-session-relocate/{describe,move,status} 桥接。
+# 客户端：lib/client.js 往会话行「…」菜单注入「移动到工作区…」。
+#
+# 安装：dsh plugin --profile web add <你 clone 下来的 dsh-session-relocate 目录>
+#
+# 配置（均可被 profile 层覆盖；下面列的是**代码真正读的键**和它们的默认值）：
+#   bridgePrefix   HTTP 桥接前缀，默认 /api/dsh-session-relocate
+#   journalsDir    迁移日志目录，默认 <dsh home>/session-move
+#   moveLive       true：正在回答的对话走「就地接管」；false：拒绝搬正在跑的
+#   releaseLive    true：打开着但空闲的对话先自动释放再搬；false：拒绝搬打开中的
+#   dragMove       true：侧边栏拖动搬移生效；false：只留菜单那条路
+#   selftest       false：true 时多挂 __selftest/* 路由（只在自测时开）
+# 这里只写 bridgePrefix —— 其余键留空就是代码里的默认值，避免同一个默认值写两处。
+- insert:
+    - id: session-relocate
+      name: dsh-session-relocate
+      config:
+        bridgePrefix: /api/dsh-session-relocate

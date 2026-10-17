@@ -1,0 +1,64 @@
+{
+  "name": "dsh-session-relocate",
+  "version": "0.1.0",
+  "description": "跨工作区移动 DSH 对话：把某个 Session 的日志文件与工作区归属整体搬到另一个工作区（可自动注册新工作区）。带日志级崩溃恢复的安全事务，并且会先安全释放「已打开但空闲」的会话 —— 所以正在打开的对话也能直接搬，不需要重启 DSH。",
+  "type": "module",
+  "main": "src/plugin.js",
+  "exports": {
+    ".": "./src/plugin.js",
+    "./relocate": "./src/relocate.js",
+    "./paths": "./src/paths.js",
+    "./zstd": "./src/zstd.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "scripts",
+    "docs",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    },
+    "engines": {
+      "dsh": ">=0.2.0-rc.2"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.2": "compatible",
+        "0.2.1-alpha.2": "compatible"
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.15"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "workspace",
+    "session",
+    "conversation",
+    "move"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DDDMUC/dsh-session-relocate.git"
+  },
+  "homepage": "https://github.com/DDDMUC/dsh-session-relocate#readme"
+}
