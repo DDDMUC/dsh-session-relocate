@@ -596,3 +596,177 @@ test('拖动：读不到分组结构时退化成「只认工作区行」的老�
   assert.equal(bareWorkspace.classList.contains('dshsm-drop'), true, '退化路径高亮那一行本身');
   delete globalThis.document;
 });
+
+// ── 批量搬移（多选）──────────────────────────────────────────────────────────
+// 逻辑（runBulkMove）不碰 DOM；独立模式（勾选圈 + 底栏）用极小的 DOM 替身驱动。
+// 宿主（dsh-delete-session）存在时，入口让位给它的底栏，只保留 moveSelection 契约。
+
+/** 造一个够用的 DOM：body/head、元素工厂、treeitem 行、监听与事件记录。 */
+function makeBulkDom(rowIds) {
+  const listeners = new Map();
+  const dispatched = [];
+  function makeEl(tag) {
+    const node = {
+      tagName: tag, children: [], parentNode: null, style: {}, dataset: {}, textContent: '', disabled: false, type: '',
+      classList: {
+        set: new Set(),
+        add(name) { this.set.add(name); },
+        remove(name) { this.set.delete(name); },
+        contains(name) { return this.set.has(name); },
+      },
+      attributes: {},
+      get className() { return Array.from(this.classList.set).join(' '); },
+      set className(value) { this.classList.set = new Set(String(value).split(/\s+/).filter(Boolean)); },
+      setAttribute(name, value) { this.attributes[name] = String(value); },
+      getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; },
+      appendChild(child) { child.parentNode = this; this.children.push(child); return child; },
+      insertBefore(child) { child.parentNode = this; this.children.unshift(child); return child; },
+      removeChild(child) { const at = this.children.indexOf(child); if (at >= 0) this.children.splice(at, 1); },
+      remove() { if (this.parentNode !== null) this.parentNode.removeChild(this); },
+      addEventListener() {},
+      querySelector(selector) {
+        if (selector === ':scope > .dshsm-check') {
+          return this.children.find((child) => child.classList.contains('dshsm-check')) ?? null;
+        }
+        return null;
+      },
+      get firstChild() { return this.children.length > 0 ? this.children[0] : null; },
+    };
+    return node;
+  }
+  const body = makeEl('body');
+  const head = makeEl('head');
+  const rows = (rowIds ?? []).map((id) => { const row = makeEl('div'); row.setAttribute('data-row-key', 'session:' + id); return row; });
+  const doc = {
+    body, head,
+    addEventListener(type, handler) { listeners.set(type, handler); },
+    removeEventListener(type) { listeners.delete(type); },
+    createElement(tag) { return makeEl(tag); },
+    querySelector() { return null; },
+    querySelectorAll(selector) { return selector === '[role="treeitem"]' ? rows : []; },
+    dispatchEvent(event) { dispatched.push(event); return true; },
+  };
+  return { doc, listeners, dispatched, rows, body };
+}
+
+async function makeBulkApi() {
+  const entry = await loadBundle();
+  const react = makeReact();
+  return entry.factory((name) => {
+    if (name === 'react') return react;
+    throw new Error('unexpected require: ' + name);
+  });
+}
+
+function installBulkGlobals() {
+  globalThis.__DSH_SESSION_RELOCATE__ = { prefix: PREFIX };
+  delete globalThis.__DSH_DELETE_SESSION__;
+  Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true });
+}
+
+test('批量：apply 把契约合并进引导全局（不覆盖 prefix），并派发 ready 事件', async () => {
+  const api = await makeBulkApi();
+  const dom = makeBulkDom([]);
+  globalThis.document = dom.doc;
+  installBulkGlobals();
+  let registered = 0;
+  api.apply({
+    effect() {},
+    slots: { inject(name, factory) { registered += 1; const value = factory(); return typeof value === 'function' ? value : () => {}; }, register() { return () => {}; } },
+  });
+  const contract = globalThis.__DSH_SESSION_RELOCATE__;
+  assert.equal(contract.prefix, PREFIX, '主机注入的 prefix 不能被覆盖');
+  assert.equal(contract.supportsBulkMove, true);
+  assert.equal(typeof contract.moveSelection, 'function');
+  assert.ok(dom.dispatched.some((event) => event.type === 'dsh-session-relocate:ready'), '应当派发 ready 事件');
+  assert.equal(registered, 1, '只 inject 一次 slot（里面注册两个条目）');
+  delete globalThis.document;
+});
+
+test('批量：runBulkMove 串行搬、逐条分类、进度 1..N', async () => {
+  const api = await makeBulkApi();
+  installBulkGlobals();
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push({ url, body });
+    if (body.sessionId.indexOf('ok') >= 0) return { status: 200, json: async () => ({ ok: true, applied: 'live' }) };
+    if (body.sessionId.indexOf('skip') >= 0) return { status: 200, json: async () => ({ ok: false, code: 'already-there', message: '已经在目标工作区' }) };
+    return { status: 200, json: async () => ({ ok: false, code: 'session-active', message: '这个对话正在跑' }) };
+  };
+  const progress = [];
+  const result = await api.__bulk.runBulkMove(['session-ok-1', 'session-skip-1', 'session-bad-1'], 'ws-dst', {
+    onProgress: (done, total) => progress.push([done, total]),
+  });
+  assert.deepEqual(calls.map((call) => call.body.sessionId), ['session-ok-1', 'session-skip-1', 'session-bad-1'], '必须串行、按顺序');
+  assert.deepEqual(progress, [[1, 3], [2, 3], [3, 3]]);
+  assert.equal(result.moved, 1);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.failed, 1);
+  assert.equal(result.total, 3);
+  assert.deepEqual(result.results.map((item) => item.status), ['moved', 'skipped', 'failed']);
+  assert.equal(result.results[2].code, 'session-active');
+});
+
+test('批量：宿主支持批量动作时，「多选」入口让位（渲染 null）', async () => {
+  const api = await makeBulkApi();
+  const dom = makeBulkDom([]);
+  globalThis.document = dom.doc;
+  installBulkGlobals();
+  globalThis.__DSH_DELETE_SESSION__ = { supportsBulkMove: true };
+  assert.equal(api.__bulkEntry({}), null, '宿主在时不该出现第二个多选入口');
+  delete globalThis.__DSH_DELETE_SESSION__;
+  const node = api.__bulkEntry({ useMenuOpenState: () => [true, () => {}] });
+  assert.equal(node.type, 'button');
+  assert.equal(textOf(node), '多选');
+  delete globalThis.document;
+});
+
+test('批量：进入多选 → 底部条（已选 0、移动禁用）→ 点行选中 → 退出清理', async () => {
+  const api = await makeBulkApi();
+  const dom = makeBulkDom(['session-a', 'session-b']);
+  globalThis.document = dom.doc;
+  installBulkGlobals();
+  const bulk = api.__bulk;
+  bulk.enterBulk();
+  assert.equal(bulk.state.selecting, true);
+  assert.equal(bulk.state.countNode.textContent, '已选 0 个');
+  assert.equal(bulk.state.moveNode.disabled, true, '0 个时「移动」必须禁用');
+  assert.ok(dom.body.children.includes(bulk.state.bar), '底栏应当挂到 body');
+
+  const click = dom.listeners.get('click');
+  click({ target: { closest: () => dom.rows[0] }, preventDefault() {}, stopPropagation() {} });
+  assert.equal(bulk.state.countNode.textContent, '已选 1 个');
+  assert.equal(bulk.state.moveNode.disabled, false);
+  bulk.bulkDecorate();
+  const check = dom.rows[0].querySelector(':scope > .dshsm-check');
+  assert.ok(check !== null, '选中后行首应当出现勾选圈');
+  assert.equal(check.classList.contains('dshsm-check-on'), true);
+  const otherCheck = dom.rows[1].querySelector(':scope > .dshsm-check');
+  assert.ok(otherCheck !== null, '没选的行也该有圈（空圈），方便点选');
+  assert.equal(otherCheck.classList.contains('dshsm-check-on'), false, '没选的行不该是选中态');
+
+  bulk.exitBulk();
+  assert.equal(bulk.state.selecting, false);
+  assert.equal(dom.body.children.length, 0, '底栏要被移除');
+  assert.equal(dom.rows[0].querySelector(':scope > .dshsm-check'), null, '勾选圈要被移除');
+  assert.equal(dom.listeners.has('click'), false, '监听要摘掉');
+  delete globalThis.document;
+});
+
+test('批量：移动被取消时保留选中、不退出多选', async () => {
+  const api = await makeBulkApi();
+  const dom = makeBulkDom(['session-a']);
+  globalThis.document = dom.doc;
+  installBulkGlobals();
+  const bulk = api.__bulk;
+  bulk.state.moveSelectionFn = async () => ({ canceled: true, moved: 0, failed: 0, skipped: 0, total: 1, results: [] });
+  bulk.enterBulk();
+  dom.listeners.get('click')({ target: { closest: () => dom.rows[0] }, preventDefault() {}, stopPropagation() {} });
+  bulk.bulkMoveSelected();
+  await flush();
+  assert.equal(bulk.state.selecting, true, '取消不该退出多选');
+  assert.equal(bulk.state.countNode.textContent, '已选 1 个', '取消后选中还在');
+  assert.equal(bulk.state.moveNode.disabled, false);
+  delete globalThis.document;
+});
