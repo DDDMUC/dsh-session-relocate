@@ -150,6 +150,14 @@ export function makeFixture(name, group = 'relocate') {
     listActivity: async () => state.activity,
     describeActivity: (activity) => activity.map((entry) => entry.kind).join('、'),
     refreshHeaderIndex: async () => { calls.push(['refresh']); return true; },
+    async adoptSessions(ids, targetEntity, cwd) {
+      calls.push(['adopt-batch', targetEntity.id, ids.slice().join(',')]);
+      return { applied: true, refreshed: false };
+    },
+    async detachSessions(ids, sourceEntity) {
+      calls.push(['detach-batch', sourceEntity.id, ids.slice().join(',')]);
+      return { applied: true };
+    },
     invalidateProjection: async (id) => { projections.push(id); },
     log: (level, message) => { logs.push([level, message]); },
   };

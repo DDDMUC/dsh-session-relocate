@@ -392,21 +392,14 @@ export async function relocateSession(host, store, request) {
   const performFileTransaction = async () => {
     let promoted = false;
     try {
-      const names = await store.stageAndPatch(plan, sessionId, target.path);
-      journal.generations = names;
-      journal.phase = 'staged';
-      await store.writeJournal(journal);
-
+      // 只写一次日志（下面不再逐相位重写）：recoverOne 完全按「源在不在、目标在不在」
+      // 推导该补哪一步，相位字段对恢复没有作用，逐相位 atomicWrite 是纯开销。
+      await store.stageAndPatch(plan, sessionId, target.path);
       await store.verifyPromoted(plan.stagingDir, sessionId, target.path);
       await mkdir(plan.dstProjectDir, { recursive: true });
       await rename(plan.stagingDir, plan.dstDir);
       promoted = true;
-      journal.phase = 'moved';
-      await store.writeJournal(journal);
-
       await rm(plan.srcDir, { recursive: true, force: true });
-      journal.phase = 'src-removed';
-      await store.writeJournal(journal);
       return { ok: true };
     } catch (error) {
       if (!promoted) {
@@ -465,6 +458,25 @@ export async function relocateSession(host, store, request) {
       released,
       handedOff,
       pendingReason: outcome.pendingReason,
+    };
+  }
+
+  // 批量搬移用：文件事务做完就返回，注册表留给 commitMoves 一次性写。
+  // 这样 N 条会话只付 2 次注册表写，而不是 2N 次。日志故意不删 —— 它既是
+  // commit 的输入，也是"commit 之前崩掉"时恢复的依据（recoverOne 按文件状态幂等补完）。
+  if (request.deferRegistry === true) {
+    return {
+      ok: true,
+      deferred: true,
+      opId,
+      sessionId,
+      from: sourceCanonical,
+      to: target.path,
+      targetWorkspaceId: target.id,
+      targetTitle: target.title,
+      movedTo: plan.dstDir,
+      released,
+      handedOff,
     };
   }
 
@@ -580,6 +592,108 @@ export async function recoverPendingMoves(host, store) {
     await store.sweepStaging(new Set(journals.map((entry) => entry.opId))).catch(() => 0);
   }
   return results;
+}
+
+/** 把一个 id 归到 map[key] 的数组里。 */
+function groupInto(map, key, value) {
+  const list = map.get(key);
+  if (list === undefined) map.set(key, [value]);
+  else list.push(value);
+}
+
+/**
+ * 批量收尾：把 deferRegistry 留下的一摞迁移日志一次性结算。
+ *
+ * 做三件事：
+ *   1. 逐条确认文件状态（源还在就删、目标没就位就重做），与 recoverOne 同一套幂等规则；
+ *   2. 注册表只写「每个目标工作区一次 + 每个源工作区一次」，不再是每会话两次；
+ *   3. 清日志、清暂存区、失效投影缓存。
+ *
+ * 注册表写失败时**故意保留日志**：recoverOne 会在下次桥接调用或下次启动时补完归属。
+ *
+ * @param host - DSH 适配层（需要 adoptSessions / detachSessions）。
+ * @param store - 迁移引擎。
+ * @param sessionIds - 只结算这些会话；缺省表示结算全部未完成日志。
+ * @returns { ok, results, message? }。
+ */
+export async function commitMoves(host, store, sessionIds) {
+  const wanted = Array.isArray(sessionIds) && sessionIds.length > 0 ? new Set(sessionIds) : null;
+  const journals = (await store.readJournals()).filter((entry) => wanted === null || wanted.has(entry.sessionId));
+  const results = [];
+  const byTarget = new Map();
+  const bySource = new Map();
+  const settled = [];
+
+  for (const journal of journals) {
+    try {
+      const srcExists = existsSync(journal.srcDir);
+      const dstExists = existsSync(journal.dstDir);
+      if (!srcExists && !dstExists) {
+        await store.removeJournal(journal.opId).catch(() => {});
+        results.push({ sessionId: journal.sessionId, status: 'lost', message: '源目录与目标目录都不存在' });
+        continue;
+      }
+      if (!dstExists) {
+        // 目标还没就位（多半是 commit 之前崩了）：照着日志重做一遍文件事务。
+        const plan = store.layout(journal.sessionId, journal.fromCwd, journal.toCwd, journal.opId);
+        plan.srcDir = journal.srcDir;
+        plan.dstDir = journal.dstDir;
+        await rm(plan.stagingOpDir, { recursive: true, force: true });
+        await store.stageAndPatch(plan, journal.sessionId, journal.toCwd);
+        await store.verifyPromoted(plan.stagingDir, journal.sessionId, journal.toCwd);
+        await mkdir(plan.dstProjectDir, { recursive: true });
+        await rename(plan.stagingDir, plan.dstDir);
+      }
+      if (existsSync(journal.srcDir)) await rm(journal.srcDir, { recursive: true, force: true });
+      const target = host.findWorkspaceByPath(journal.toCwd);
+      if (target === undefined) {
+        results.push({ sessionId: journal.sessionId, status: 'pending-workspace', message: '目标工作区未找到：' + journal.toCwd });
+        continue;
+      }
+      groupInto(byTarget, journal.toCwd, journal.sessionId);
+      groupInto(bySource, journal.fromCwd, journal.sessionId);
+      settled.push(journal);
+      results.push({ sessionId: journal.sessionId, status: 'moved', to: journal.toCwd, targetWorkspaceId: target.id });
+    } catch (error) {
+      results.push({ sessionId: journal.sessionId, status: 'failed', message: String(error && error.message !== undefined ? error.message : error) });
+    }
+  }
+
+  if (settled.length === 0) return { ok: true, results };
+
+  try {
+    for (const [toCwd, ids] of byTarget) {
+      const target = host.findWorkspaceByPath(toCwd);
+      const adopted = await host.adoptSessions(ids, target, toCwd);
+      if (adopted !== undefined && adopted !== null && adopted.applied === false) {
+        throw new MoveError('registry-failed', '写入目标工作区归属失败：' + String(adopted.reason));
+      }
+    }
+    for (const [fromCwd, ids] of bySource) {
+      const source = host.findWorkspaceByPath(fromCwd);
+      if (source === undefined) continue;
+      const detached = await host.detachSessions(ids, source);
+      if (detached !== undefined && detached !== null && detached.applied === false) {
+        throw new MoveError('registry-failed', '从源工作区摘除失败：' + String(detached.reason));
+      }
+    }
+  } catch (error) {
+    host.log('warn', '批量结算写注册表失败（文件已就位，日志保留待恢复）：' + String(error && error.message));
+    return {
+      ok: false,
+      message: '文件已搬移，但工作区归属写入失败（下次桥接调用会自动补齐）：' + String(error && error.message),
+      results: results.map((entry) => (entry.status === 'moved' ? { ...entry, status: 'failed', message: '归属待补齐' } : entry)),
+    };
+  }
+
+  for (const journal of settled) {
+    await store.removeJournal(journal.opId).catch(() => {});
+    await store.dropStaging(journal.opId).catch(() => {});
+  }
+  for (const journal of settled) {
+    await host.invalidateProjection(journal.sessionId);
+  }
+  return { ok: true, results };
 }
 
 async function recoverOne(host, store, journal) {

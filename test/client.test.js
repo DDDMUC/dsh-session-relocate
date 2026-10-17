@@ -683,14 +683,19 @@ test('批量：apply 把契约合并进引导全局（不覆盖 prefix），并�
   delete globalThis.document;
 });
 
-test('批量：runBulkMove 串行搬、逐条分类、进度 1..N', async () => {
+test('批量：runBulkMove 逐条 defer + 一次 commit、逐条分类、进度 1..N', async () => {
   const api = await makeBulkApi();
   installBulkGlobals();
   const calls = [];
   globalThis.fetch = async (url, options) => {
     const body = JSON.parse(options.body);
     calls.push({ url, body });
-    if (body.sessionId.indexOf('ok') >= 0) return { status: 200, json: async () => ({ ok: true, applied: 'live' }) };
+    if (url.endsWith('/status')) return { status: 200, json: async () => ({ ok: true, bulkDefer: true }) };
+    if (url.endsWith('/move-commit')) {
+      // 只有 defer 成功的那条会进 commit
+      return { status: 200, json: async () => ({ ok: true, results: body.sessionIds.map((id) => ({ sessionId: id, status: 'moved' })) }) };
+    }
+    if (body.sessionId.indexOf('ok') >= 0) return { status: 200, json: async () => ({ ok: true, deferred: true }) };
     if (body.sessionId.indexOf('skip') >= 0) return { status: 200, json: async () => ({ ok: false, code: 'already-there', message: '已经在目标工作区' }) };
     return { status: 200, json: async () => ({ ok: false, code: 'session-active', message: '这个对话正在跑' }) };
   };
@@ -698,7 +703,11 @@ test('批量：runBulkMove 串行搬、逐条分类、进度 1..N', async () => 
   const result = await api.__bulk.runBulkMove(['session-ok-1', 'session-skip-1', 'session-bad-1'], 'ws-dst', {
     onProgress: (done, total) => progress.push([done, total]),
   });
-  assert.deepEqual(calls.map((call) => call.body.sessionId), ['session-ok-1', 'session-skip-1', 'session-bad-1'], '必须串行、按顺序');
+  const moveCalls = calls.filter((call) => call.url.endsWith('/move'));
+  const commitCall = calls.find((call) => call.url.endsWith('/move-commit'));
+  assert.deepEqual(moveCalls.map((call) => call.body.sessionId), ['session-ok-1', 'session-skip-1', 'session-bad-1'], '三条依次 defer');
+  assert.equal(moveCalls[0].body.deferRegistry, true, '逐条搬移必须 defer 注册表');
+  assert.deepEqual(commitCall.body.sessionIds, ['session-ok-1'], '只有 defer 成功的那条进 commit');
   assert.deepEqual(progress, [[1, 3], [2, 3], [3, 3]]);
   assert.equal(result.moved, 1);
   assert.equal(result.skipped, 1);
@@ -706,6 +715,41 @@ test('批量：runBulkMove 串行搬、逐条分类、进度 1..N', async () => 
   assert.equal(result.total, 3);
   assert.deepEqual(result.results.map((item) => item.status), ['moved', 'skipped', 'failed']);
   assert.equal(result.results[2].code, 'session-active');
+});
+
+test('批量：老主机没有 bulkDefer 时退回逐条单发（不调 /move-commit）', async () => {
+  const api = await makeBulkApi();
+  installBulkGlobals();
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push({ url, body });
+    if (url.endsWith('/status')) return { status: 200, json: async () => ({ ok: true }) };
+    return { status: 200, json: async () => ({ ok: true, applied: 'live' }) };
+  };
+  const result = await api.__bulk.runBulkMove(['session-a', 'session-b'], 'ws-dst', {});
+  assert.equal(result.moved, 2, '老主机上逐条直接搬，照常可用');
+  assert.equal(result.failed, 0);
+  assert.equal(calls.some((call) => call.url.endsWith('/move-commit')), false, '不支持时不该调 commit');
+  assert.equal(calls.find((call) => call.url.endsWith('/move')).body.deferRegistry, false, '不支持时不能 defer');
+});
+
+test('批量：commit 失败时不乐观隐藏（那条按失败计，并带上原因）', async () => {
+  const api = await makeBulkApi();
+  installBulkGlobals();
+  globalThis.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    if (url.endsWith('/status')) return { status: 200, json: async () => ({ ok: true, bulkDefer: true }) };
+    if (url.endsWith('/move-commit')) {
+      return { status: 200, json: async () => ({ ok: false, message: '归属写入失败' }) };
+    }
+    return { status: 200, json: async () => ({ ok: true, deferred: true }) };
+  };
+  const result = await api.__bulk.runBulkMove(['session-a', 'session-b'], 'ws-dst', {});
+  assert.equal(result.moved, 0, 'commit 没成功就不能报已搬');
+  assert.equal(result.failed, 2);
+  assert.equal(result.results[0].code, 'commit-failed');
+  assert.match(result.results[0].message, /归属写入失败/);
 });
 
 test('批量：宿主支持批量动作时，「多选」入口让位（渲染 null）', async () => {

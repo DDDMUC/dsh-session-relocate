@@ -18,7 +18,7 @@ import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { encodeSegment, sessionDir } from './paths.js';
-import { createMoveStore, MoveError, recoverPendingMoves, relocateSession, samePath } from './relocate.js';
+import { commitMoves, createMoveStore, MoveError, recoverPendingMoves, relocateSession, samePath } from './relocate.js';
 
 /** 插件名（必须与 package.json 的 name 一致）。 */
 export const name = 'dsh-session-relocate';
@@ -372,6 +372,52 @@ export function apply(ctx, config) {
           return { applied: false, refreshed: false, reason: '直接写注册表归属失败：' + String(error && error.message) };
         }
       },
+      /**
+       * 批量归属写入（commitMoves 用）：先把这批会话的 header 缓存/路径索引一次性指到
+       * 目标 cwd，再**一次 mutate** 把整批加进目标工作区 —— 注册表只落盘一次。
+       * 和 adoptSession 同一条旁路，区别只是按批做。
+       */
+      async adoptSessions(sessionIds, targetEntity, targetCwd) {
+        const registry = ctx.workspaceRegistry;
+        try {
+          if (typeof targetEntity.mutate !== 'function') {
+            return { applied: false, refreshed: false, reason: '目标工作区实体没有 mutate 接口（DSH 版本变了）' };
+          }
+          for (const sessionId of sessionIds) {
+            const liveSession = ctx.get('sessions')?.get(sessionId);
+            const existing = registry.headers instanceof Map ? registry.headers.get(sessionId) : undefined;
+            const base = liveSession !== undefined && liveSession.header !== undefined
+              ? liveSession.header
+              : (existing !== undefined ? existing : { version: 4, id: sessionId, createdAt: Date.now(), isSeeded: false });
+            if (registry.sessionPaths instanceof Map) registry.sessionPaths.set(sessionId, targetCwd);
+            if (registry.invalidSessionPaths instanceof Map) registry.invalidSessionPaths.delete(sessionId);
+            if (registry.headers instanceof Map) registry.headers.set(sessionId, { ...base, cwd: targetCwd });
+          }
+          await targetEntity.mutate((record) => {
+            const add = sessionIds.filter((id) => !record.sessionIds.includes(id));
+            return add.length === 0 ? record : { ...record, sessionIds: [...add, ...record.sessionIds] };
+          });
+          return { applied: true, refreshed: false };
+        } catch (error) {
+          return { applied: false, refreshed: false, reason: '批量写目标归属失败：' + String(error && error.message) };
+        }
+      },
+      /** 批量摘除（commitMoves 用）：一次 mutate 把整批从源工作区拿掉。 */
+      async detachSessions(sessionIds, sourceEntity) {
+        if (sourceEntity === undefined || sourceEntity === null || typeof sourceEntity.mutate !== 'function') {
+          return { applied: true };
+        }
+        try {
+          const drop = new Set(sessionIds);
+          await sourceEntity.mutate((record) => {
+            const keep = record.sessionIds.filter((id) => !drop.has(id));
+            return keep.length === record.sessionIds.length ? record : { ...record, sessionIds: keep };
+          });
+          return { applied: true };
+        } catch (error) {
+          return { applied: false, reason: '批量摘除源归属失败：' + String(error && error.message) };
+        }
+      },
       async releaseSession(sessionId) {
         const sessions = ctx.get('sessions');
         if (sessions === undefined || typeof sessions.get !== 'function') {
@@ -556,10 +602,33 @@ export function apply(ctx, config) {
     const targetWorkspaceId = typeof body.targetWorkspaceId === 'string' ? body.targetWorkspaceId : '';
     const targetPath = typeof body.targetPath === 'string' ? body.targetPath.trim() : '';
     try {
-      const receipt = await relocateSession(buildHost(), store, { sessionId, targetWorkspaceId, targetPath, releaseLive, moveLive });
+      const receipt = await relocateSession(buildHost(), store, {
+        sessionId,
+        targetWorkspaceId,
+        targetPath,
+        releaseLive,
+        moveLive,
+        // 批量搬移时客户端逐条 defer：文件事务各自做完，注册表最后一次性写。
+        deferRegistry: body.deferRegistry === true,
+      });
       return { ok: true, ...receipt };
     } catch (error) {
       log('warn', '迁移失败：' + String(error && error.message));
+      return failure(error);
+    }
+  }
+
+  /** 批量收尾：把一串 defer 过的迁移的归属一次性写进注册表。 */
+  async function moveCommit(body) {
+    const ids = Array.isArray(body.sessionIds)
+      ? body.sessionIds.filter((entry) => typeof entry === 'string' && entry.length > 0)
+      : [];
+    if (ids.length === 0) return { ok: false, code: 'bad-request', message: '缺少 sessionIds' };
+    try {
+      const result = await commitMoves(buildHost(), store, ids);
+      return { ok: result.ok !== false, ...result };
+    } catch (error) {
+      log('warn', '批量结算失败：' + String(error && error.message));
       return failure(error);
     }
   }
@@ -577,6 +646,8 @@ export function apply(ctx, config) {
       moveLive,
       dragMove,
       selftest,
+      // 批量搬移的两段式（defer 文件事务 + 一次 commit 写注册表）由客户端按这个能力位决定是否启用。
+      bulkDefer: true,
       sessionsRoot: store.sessionsRoot,
       journalsDir: store.journalsDir,
       pending: journals.map((journal) => ({
@@ -778,6 +849,7 @@ export function apply(ctx, config) {
       const routes = [
         route(prefix + '/describe', ['POST'], describe),
         route(prefix + '/move', ['POST'], move),
+      route(prefix + '/move-commit', ['POST'], moveCommit),
         route(prefix + '/status', ['GET', 'POST'], status),
       ];
       if (selftest) {

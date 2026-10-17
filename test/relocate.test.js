@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { zstdCompressSync } from 'node:zlib';
 import { encodeSegment, projectDir } from '../src/paths.js';
 import { decodeAllFrames, readFirstLine } from '../src/zstd.js';
-import { recoverPendingMoves, relocateSession, MoveError } from '../src/relocate.js';
+import { commitMoves, recoverPendingMoves, relocateSession, MoveError } from '../src/relocate.js';
 import {
   SESSION_ID, COMPRESS, makeFixture, makeLog, makePlainLog,
   assertSingleOccurrence, stagingCount, journalCount,
@@ -292,5 +292,55 @@ test('注册表收尾失败时磁盘已就位、日志保留，之后可自动�
   assert.equal(journalCount(fixture), 0);
   assert.deepEqual(fixture.calls, [['refresh'], ['attach', 'ws-dst', SESSION_ID], ['detach', 'ws-src', SESSION_ID]]);
   assertSingleOccurrence(fixture);
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
+test('deferRegistry：只做文件事务，注册表一个字都不写，日志故意留着', async () => {
+  const fixture = makeFixture('defer');
+  const store = fixture.makeStore();
+  const receipt = await relocateSession(fixture.host, store, {
+    sessionId: SESSION_ID,
+    targetWorkspaceId: 'ws-dst',
+    deferRegistry: true,
+  });
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.deferred, true);
+  assert.ok(existsSync(fixture.dstDir), '文件必须已经就位');
+  assert.ok(!existsSync(fixture.srcDir), '源目录必须已经删除');
+  assert.deepEqual(fixture.calls, [], 'defer 阶段不许碰注册表');
+  assert.equal(fixture.projections.length, 0, '投影缓存留到 commit 再失效');
+  assert.equal(journalCount(fixture), 1, '日志必须留着当下一次 commit 的输入');
+  assertSingleOccurrence(fixture);
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
+test('commitMoves：整批只写一次注册表，清日志、清暂存、失效投影', async () => {
+  const fixture = makeFixture('commit');
+  const store = fixture.makeStore();
+  await relocateSession(fixture.host, store, { sessionId: SESSION_ID, targetWorkspaceId: 'ws-dst', deferRegistry: true });
+  const result = await commitMoves(fixture.host, store, [SESSION_ID]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.results.map((entry) => entry.status), ['moved']);
+  assert.deepEqual(fixture.calls, [
+    ['adopt-batch', 'ws-dst', SESSION_ID],
+    ['detach-batch', 'ws-src', SESSION_ID],
+  ], '整个批次只该有两次注册表写，且不刷新全量 header 索引');
+  assert.equal(journalCount(fixture), 0);
+  assert.equal(stagingCount(fixture), 0);
+  assert.deepEqual(fixture.projections, [SESSION_ID]);
+  assertSingleOccurrence(fixture);
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
+test('commitMoves：注册表写失败时保留日志，不假装成功', async () => {
+  const fixture = makeFixture('commit-fail');
+  const store = fixture.makeStore();
+  await relocateSession(fixture.host, store, { sessionId: SESSION_ID, targetWorkspaceId: 'ws-dst', deferRegistry: true });
+  const brokenHost = Object.create(fixture.host);
+  brokenHost.adoptSessions = async () => ({ applied: false, reason: '模拟注册表拒绝' });
+  const result = await commitMoves(brokenHost, store, [SESSION_ID]);
+  assert.equal(result.ok, false);
+  assert.match(result.message, /自动补齐|归属/);
+  assert.equal(journalCount(fixture), 1, '日志必须留着让 recoverOne 补完归属');
   rmSync(fixture.base, { recursive: true, force: true });
 });

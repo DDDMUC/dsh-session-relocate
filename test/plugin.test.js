@@ -201,13 +201,13 @@ function routeFor(routes, suffix) {
   return found;
 }
 
-test('apply 注册 3 条桥接路由，并注入引导全局', async () => {
+test('apply 注册 4 条桥接路由，并注入引导全局', async () => {
   const fixture = makeFixture('plugin-wire', 'plugin');
   const harness = makeCtx(fixture, { bridgePrefix: '/api/test-move', sessionsRoot: fixture.sessionsRoot, journalsDir: fixture.journalsDir, home: fixture.base });
   assert.deepEqual(harness.routes.map((route) => route.path).sort(), [
-    '/api/test-move/describe', '/api/test-move/move', '/api/test-move/status',
+    '/api/test-move/describe', '/api/test-move/move', '/api/test-move/move-commit', '/api/test-move/status',
   ]);
-  assert.deepEqual(harness.routes.map((route) => route.kind), ['exact', 'exact', 'exact']);
+  assert.deepEqual(harness.routes.map((route) => route.kind), ['exact', 'exact', 'exact', 'exact']);
 
   const table = [];
   harness.events.get('webserver/index-inject')(table);
