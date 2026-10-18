@@ -597,6 +597,53 @@ test('拖动：读不到分组结构时退化成「只认工作区行」的老�
   delete globalThis.document;
 });
 
+test('拖动：重复 install 只挂一套监听；卸载其中一个后拖动仍然有效（幂等）', async () => {
+  const harness = await mountDrag({});
+  const firstUninstall = harness.uninstall;
+  const secondUninstall = harness.drag.installDrag();
+  assert.equal(harness.listeners.size, 5, '第二次 install 不应重复挂监听');
+
+  // 模拟「旧 effect 的 disposer 先跑」：还有一个 install 在用，监听不能被撤掉。
+  firstUninstall();
+  assert.equal(harness.listeners.size, 5, '还有一次 install 没卸载，监听必须保留');
+
+  const src = makeGroup('ws-src', [SESSION_ID]);
+  const dst = makeGroup('ws-dst', [OTHER_SESSION]);
+  makeTree([src, dst]);
+  harness.drag.onDragStart(makeEvent(rowsIn(src, 'session:')[0]));
+  const over = makeEvent(rowsIn(dst, 'session:')[0]);
+  harness.drag.onDragOver(over);
+  assert.equal(over.defaultPrevented, true, '剩余那次 install 的拖动必须还能用');
+
+  secondUninstall();
+  assert.equal(harness.listeners.size, 0, '最后一次卸载后监听应清空');
+  delete globalThis.document;
+});
+
+test('拖动：会话被搬到别处后，同一页面再拖不应把旧分组当源（源缓存不能陈旧）', async () => {
+  const harness = await mountDrag({});
+  const oldHome = makeGroup('ws-src', [SESSION_ID]);
+  makeTree([oldHome, makeGroup('ws-dst', [OTHER_SESSION])]);
+
+  // 第一次拖动：源 = ws-src（如果实现有缓存，这次会把它记住）。
+  harness.drag.onDragStart(makeEvent(rowsIn(oldHome, 'session:')[0]));
+  assert.equal(harness.drag.state.sourceWorkspaceId, 'ws-src');
+  harness.drag.onDragEnd();
+
+  // 会话已被搬到 ws-dst：DOM 里它现在在 ws-dst 分组里，ws-src 成了「别的工作区」。
+  const newHome = makeGroup('ws-dst', [SESSION_ID]);
+  makeTree([newHome, makeGroup('ws-extra', [])]);
+
+  harness.drag.onDragStart(makeEvent(rowsIn(newHome, 'session:')[0]));
+  assert.equal(harness.drag.state.sourceWorkspaceId, 'ws-dst', '源工作区必须每次从 DOM 现读，不能用上一次的缓存');
+
+  const over = makeEvent(rowsIn(oldHome, 'workspace:')[0]);
+  harness.drag.onDragOver(over);
+  assert.equal(over.defaultPrevented, true, '搬回旧工作区应当被接管，而不是被当成「源分组」让路');
+  assert.equal(oldHome.classList.contains('dshsm-drop'), true);
+  delete globalThis.document;
+});
+
 // ── 批量搬移（多选）──────────────────────────────────────────────────────────
 // 逻辑（runBulkMove）不碰 DOM；独立模式（勾选圈 + 底栏）用极小的 DOM 替身驱动。
 // 宿主（dsh-delete-session）存在时，入口让位给它的底栏，只保留 moveSelection 契约。
