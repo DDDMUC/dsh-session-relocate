@@ -365,6 +365,8 @@ function rowsIn(section, prefix) {
 
 function makeFakeDocument() {
   const listeners = new Map();
+  const hostMarks = [];
+  const dispatched = [];
   const body = {
     children: [],
     appendChild(node) { body.children.push(node); node.parentNode = body; },
@@ -376,8 +378,10 @@ function makeFakeDocument() {
     removeEventListener(type) { listeners.delete(type); },
     createElement() { return { style: {}, textContent: '', parentNode: null, setAttribute() {} }; },
     querySelector() { return null; },
+    querySelectorAll(selector) { return selector === '.dsdel-check-on' ? hostMarks : []; },
+    dispatchEvent(event) { dispatched.push(event); return true; },
   };
-  return { doc, listeners };
+  return { doc, listeners, hostMarks, dispatched };
 }
 
 function makeEvent(target) {
@@ -399,14 +403,14 @@ async function mountDrag(routes) {
     if (name === 'react') return react;
     throw new Error('unexpected require: ' + name);
   });
-  const { doc, listeners } = makeFakeDocument();
+  const { doc, listeners, hostMarks, dispatched } = makeFakeDocument();
   globalThis.document = doc;
   const fetchHarness = makeFetch(routes);
   globalThis.fetch = fetchHarness.impl;
   globalThis.__DSH_SESSION_RELOCATE__ = { prefix: PREFIX };
   Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true });
   const uninstall = api.__drag.installDrag();
-  return { drag: api.__drag, listeners, calls: fetchHarness.calls, uninstall, doc };
+  return { drag: api.__drag, listeners, calls: fetchHarness.calls, uninstall, doc, hostMarks, dispatched };
 }
 
 const OTHER_SESSION = 'session-other-0000-4000-8000-000000000002';
@@ -641,6 +645,81 @@ test('拖动：会话被搬到别处后，同一页面再拖不应把旧分组�
   harness.drag.onDragOver(over);
   assert.equal(over.defaultPrevented, true, '搬回旧工作区应当被接管，而不是被当成「源分组」让路');
   assert.equal(oldHome.classList.contains('dshsm-drop'), true);
+  delete globalThis.document;
+});
+
+test('拖动：多选拖动把选中的整批搬走（宿主底栏的选中标记）', async () => {
+  const harness = await mountDrag({
+    '/status': () => ({ ok: true, bulkDefer: true }),
+    '/move': () => ({ ok: true, applied: 'live', targetTitle: '目标工作区' }),
+    '/move-commit': () => ({
+      ok: true,
+      results: [
+        { sessionId: SESSION_ID, status: 'moved' },
+        { sessionId: OTHER_SESSION, status: 'moved' },
+      ],
+    }),
+  });
+  const src = makeGroup('ws-src', [SESSION_ID, OTHER_SESSION]);
+  const dst = makeGroup('ws-dst', []);
+  makeTree([src, dst]);
+
+  // 宿主（dsh-delete-session）给每条选中行的复选框挂 .dsdel-check-on。
+  for (const row of rowsIn(src, 'session:')) {
+    const mark = makeElement();
+    mark.classList.add('dsdel-check-on');
+    row.appendChild(mark);
+    harness.hostMarks.push(mark);
+  }
+
+  harness.drag.onDragStart(makeEvent(rowsIn(src, 'session:')[0]));
+  assert.deepEqual(harness.drag.state.sessionIds, [SESSION_ID, OTHER_SESSION], '拖其中一条要带上整批选中');
+
+  harness.drag.onDrop(makeEvent(rowsIn(dst, 'workspace:')[0]));
+  await flush();
+  await flush();
+
+  const moves = harness.calls.filter((call) => call.url === PREFIX + '/move');
+  assert.equal(moves.length, 2, '两条都要发 /move');
+  assert.deepEqual(moves.map((call) => call.body.sessionId).sort(), [SESSION_ID, OTHER_SESSION].sort());
+  assert.equal(moves.every((call) => call.body.deferRegistry === true), true, '多选走两段式：先 defer 文件事务');
+  const commits = harness.calls.filter((call) => call.url === PREFIX + '/move-commit');
+  assert.equal(commits.length, 1, '整批只 commit 一次');
+  assert.deepEqual(commits[0].body.sessionIds.slice().sort(), [SESSION_ID, OTHER_SESSION].sort());
+  assert.ok(
+    harness.dispatched.some((event) => event.type === 'keydown' && event.key === 'Escape'),
+    '搬完要让宿主的选中态收起来',
+  );
+  delete globalThis.document;
+});
+
+test('拖动：多选里没选中的行被拖时只搬它自己', async () => {
+  const harness = await mountDrag({
+    '/status': () => ({ ok: true, bulkDefer: true }),
+    '/move': () => ({ ok: true, applied: 'live' }),
+  });
+  const src = makeGroup('ws-src', [SESSION_ID, OTHER_SESSION]);
+  const dst = makeGroup('ws-dst', []);
+  makeTree([src, dst]);
+
+  // 只选中了 OTHER_SESSION；拖的是 SESSION_ID。
+  const mark = makeElement();
+  mark.classList.add('dsdel-check-on');
+  rowsIn(src, 'session:')[1].appendChild(mark);
+  harness.hostMarks.push(mark);
+
+  harness.drag.onDragStart(makeEvent(rowsIn(src, 'session:')[0]));
+  assert.deepEqual(harness.drag.state.sessionIds, [SESSION_ID]);
+
+  harness.drag.onDrop(makeEvent(rowsIn(dst, 'workspace:')[0]));
+  await flush();
+  await flush();
+
+  const moves = harness.calls.filter((call) => call.url === PREFIX + '/move');
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0].body.sessionId, SESSION_ID);
+  assert.equal(moves[0].body.deferRegistry, undefined, '单条不走两段式');
+  assert.equal(harness.dispatched.length, 0, '没选中它就不该动宿主的选中态');
   delete globalThis.document;
 });
 
