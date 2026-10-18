@@ -199,7 +199,9 @@ POSIX 上才是会话目录里的 `session.lock`（flock）。两种情况下锁
 | `moveLive` | `true` | 正在跑活的对话是否走「就地接管」。设 `false` 则正在跑活的会被拒绝。 |
 | `dragMove` | `true` | 侧边栏拖动搬移（整块工作区分组都是投放目标）。依赖官方的 DOM 行属性与分组结构；DSH 改了约定时可一键关掉（菜单那条路不受影响）。 |
 | `releaseLive` | `true` | 打开着但空闲的对话，搬之前是否自动释放它。设 `false` 则打开中的直接拒绝。 |
-| `releaseRetries` / `releaseRetryDelayMs` | `24` / `150` | 释放后探测写租约的重试次数与间隔（最坏约 3.6 秒）。 |
+| `releaseRetries` / `releaseRetryDelayMs` | `24` / `150` | 释放后探测写租约的重试次数与间隔。前 5 次几乎即时（0/10/25/50/100 ms），之后按 150 ms 退避；回执里会带上 `releaseAttempts`。 |
+| `verify` | `auto` | 改写后的自校验强度。`auto`：压缩后 ≤ `fullVerifyLimit` 的日志全文解码，更大的只做帧级比对 + 解头解尾（回执标 `verification: 'sampled'`）。`full`：一律全文解码。 |
+| `fullVerifyLimit` | `2097152`（2 MB） | `verify: auto` 下的分界点。 |
 | `selftest` | `false` | 打开后多挂几个 `__selftest/*` 路由，用来在真实进程里造/清一个测试会话、施加写入压力、验证接管。 |
 
 ## 桥接 API
@@ -207,8 +209,9 @@ POSIX 上才是会话目录里的 `session.lock`（flock）。两种情况下锁
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `<prefix>/describe` | `{ sessionId? }` → 工作区列表；带 sessionId 时额外给出 `currentWorkspaceId`、`live`、`willHandoff`（正在跑，会就地接管）、`willRelease`（空闲，会先释放）、`activity`、`canMove`、`reason`。 |
-| POST | `<prefix>/move` | `{ sessionId, targetWorkspaceId }` 或 `{ sessionId, targetPath }` → 迁移回执（`applied: 'live' \| 'pending'`、`released`、`handedOff`、`handoffWriter`）。 |
-| GET | `<prefix>/status` | 版本/配置（含 `moveLive`/`releaseLive`）/待收尾的迁移列表；调用时会顺带尝试恢复。 |
+| POST | `<prefix>/move` | `{ sessionId, targetWorkspaceId }` 或 `{ sessionId, targetPath }` → 迁移回执（`applied: 'live' \| 'pending'`、`released`、`releaseAttempts`、`handedOff`、`verification: 'full' \| 'sampled'`）。带 `deferRegistry: true` 时只做文件事务、保留迁移日志。 |
+| POST | `<prefix>/move-commit` | `{ sessionIds }` → 把一批 defer 过的迁移的归属一次性写进注册表（每个目标/源工作区各一次 mutate），返回逐条结果。 |
+| GET | `<prefix>/status` | 版本/配置（含 `moveLive`/`releaseLive`/`verify`/`bulkDefer`）/待收尾的迁移列表；调用时会顺带尝试恢复。 |
 | POST | `<prefix>/__selftest/create-live` | 仅 `selftest: true` 时存在。造一个「已打开 + 持有写租约」的会话（`{ workspacePath, pressure? }`）。 |
 | POST | `<prefix>/__selftest/state` | 仅自测时存在。写入压力的采样时间戳 + 每次接管的窗口 + 写句柄现状。 |
 | POST | `<prefix>/__selftest/ensure-lease` | 仅自测时存在。强制写句柄重取内核锁，用来证明它把路径算到了新目录。 |

@@ -286,7 +286,7 @@ test('move：通过桥接真的把会话搬走，之后再 describe 指向新工
   assert.equal(result.json.to, fixture.dstWs);
   assert.ok(!existsSync(fixture.srcDir));
   assert.ok(existsSync(fixture.dstDir));
-  assert.deepEqual(harness.calls, [['refresh'], ['attach', 'ws-dst', SESSION_ID], ['detach', 'ws-src', SESSION_ID]]);
+  assert.deepEqual(harness.calls, [['mutate', 'ws-dst'], ['mutate', 'ws-src']], '冷搬移走定向归属写入，不再重建全量索引');
 
   const after = await call(describeRoute, 'POST', { sessionId: SESSION_ID });
   assert.equal(after.json.session.currentWorkspaceId, 'ws-dst');
@@ -343,9 +343,8 @@ test('move：探测不到写句柄时绝不静默接管，退回释放路径', a
     ['detach-live', SESSION_ID],
     ['open', SESSION_ID, 'write'],
     ['close', SESSION_ID],
-    ['refresh'],
-    ['attach', 'ws-dst', SESSION_ID],
-    ['detach', 'ws-src', SESSION_ID],
+    ['mutate', 'ws-dst'],
+    ['mutate', 'ws-src'],
   ]);
   assert.ok(!existsSync(fixture.srcDir));
   assert.ok(existsSync(fixture.dstDir));
@@ -370,9 +369,8 @@ test('move：moveLive=false 时退回「先释放再搬」（flush → detach �
     ['detach-live', SESSION_ID],
     ['open', SESSION_ID, 'write'],
     ['close', SESSION_ID],
-    ['refresh'],
-    ['attach', 'ws-dst', SESSION_ID],
-    ['detach', 'ws-src', SESSION_ID],
+    ['mutate', 'ws-dst'],
+    ['mutate', 'ws-src'],
   ]);
   assert.ok(!existsSync(fixture.srcDir));
   assert.ok(existsSync(fixture.dstDir));

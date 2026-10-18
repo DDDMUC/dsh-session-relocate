@@ -28,8 +28,9 @@ import { existsSync } from 'node:fs';
 import { cp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
+import { zstdDecompressSync } from 'node:zlib';
 import { encodeSegment, isCanonicalGenerationName } from './paths.js';
-import { decodeAllFrames, readFirstLine, replaceFirstLine } from './zstd.js';
+import { isZstdArtifact, readFirstLine, replaceFirstLine, scanZstdFrames } from './zstd.js';
 
 /** 暂存区目录名（在会话存储根目录下，靠「深一层」对后端不可见）。 */
 export const STAGING_DIR_NAME = '_session-move-staging';
@@ -91,6 +92,88 @@ export function createMoveStore(options) {
     throw new Error('createMoveStore requires a sessionDirFor(sessionId, cwd) function');
   }
   const stagingRoot = join(sessionsRoot, STAGING_DIR_NAME);
+  /** 校验强度：'auto'（小日志全文解码、大日志帧级抽样）或 'full'（永远全文解码）。 */
+  const verifyMode = options.verify === 'full' ? 'full' : 'auto';
+  /** 超过这个大小（压缩后字节数）就走抽样校验。 */
+  const fullVerifyLimit = Number.isSafeInteger(options.fullVerifyLimit) && options.fullVerifyLimit > 0
+    ? options.fullVerifyLimit
+    : 2 * 1024 * 1024;
+
+  /**
+   * 校验「改写后的日志」与「源日志」等价：除首行（header 的 cwd）外一切不变。
+   *
+   * 两种强度：
+   *   - full：逐帧解码 → 顺带证明每个完整帧都能解压、校验和对（小日志默认走这条）；
+   *   - sampled：帧级字节比对 + 解头 + 解尾 → 大日志走这条，调用方必须在回执里标明。
+   *
+   * @returns 'full' | 'sampled'
+   */
+  function verifyRewrite(source, patched) {
+    if (!isZstdArtifact(source)) {
+      // 明文日志：第一个换行之后的字节必须完全一致（等价于逐行比对，但没有解码成本）。
+      const nlSource = source.indexOf(10);
+      const nlPatched = patched.indexOf(10);
+      if (nlSource < 0 || nlPatched < 0) throw new MoveError('corrupt-log', '日志里找不到完整的一行');
+      if (source.subarray(nlSource).compare(patched.subarray(nlPatched)) !== 0) {
+        throw new MoveError('patch-differs', '改写后首行以外的内容与源不一致');
+      }
+      return 'full';
+    }
+    const before = scanZstdFrames(source);
+    const after = scanZstdFrames(patched);
+    if (before.frames.length !== after.frames.length) {
+      throw new MoveError('patch-lost-frames', '改写后帧数变了（' + String(before.frames.length) + ' -> ' + String(after.frames.length) + '）');
+    }
+    if (before.frames.length === 0) throw new MoveError('corrupt-log', '日志里没有完整帧');
+    // 第一帧：解出来，除 cwd 外必须完全一样，且首行必须真的变了。
+    const firstBefore = zstdDecompressSync(source.subarray(before.frames[0].start, before.frames[0].end));
+    const firstAfter = zstdDecompressSync(patched.subarray(after.frames[0].start, after.frames[0].end));
+    const nlBefore = firstBefore.indexOf(10);
+    const nlAfter = firstAfter.indexOf(10);
+    if (nlBefore < 0 || nlAfter < 0) throw new MoveError('corrupt-log', '第一帧里没有完整的 header 行');
+    const lineBefore = firstBefore.subarray(0, nlBefore).toString('utf8');
+    const lineAfter = firstAfter.subarray(0, nlAfter).toString('utf8');
+    if (lineBefore === lineAfter) throw new MoveError('patch-noop', '改写后 header 没有变化');
+    let headerBefore;
+    let headerAfter;
+    try {
+      headerBefore = JSON.parse(lineBefore);
+      headerAfter = JSON.parse(lineAfter);
+    } catch {
+      throw new MoveError('corrupt-log', 'header 行不是合法 JSON');
+    }
+    const left = { ...headerBefore };
+    const right = { ...headerAfter };
+    delete left.cwd;
+    delete right.cwd;
+    if (JSON.stringify(left) !== JSON.stringify(right)) throw new MoveError('patch-differs', 'header 除 cwd 之外还变了');
+    if (firstBefore.subarray(nlBefore).compare(firstAfter.subarray(nlAfter)) !== 0) {
+      throw new MoveError('patch-differs', '第一帧首行之后的内容变了');
+    }
+    // 其余帧：逐字节相同（我们根本没有重写它们）。
+    for (let i = 1; i < before.frames.length; i += 1) {
+      const fa = source.subarray(before.frames[i].start, before.frames[i].end);
+      const fb = patched.subarray(after.frames[i].start, after.frames[i].end);
+      if (fa.length !== fb.length || fa.compare(fb) !== 0) {
+        throw new MoveError('patch-differs', '第 ' + String(i + 1) + ' 帧被改动了');
+      }
+    }
+    // 尾部未写完的字节也必须原样保留。
+    const tailBefore = source.subarray(before.frames[before.frames.length - 1].end);
+    const tailAfter = patched.subarray(after.frames[after.frames.length - 1].end);
+    if (tailBefore.length !== tailAfter.length || tailBefore.compare(tailAfter) !== 0) {
+      throw new MoveError('patch-differs', '尾部未完成的字节变了');
+    }
+    if (verifyMode !== 'full' && source.length > fullVerifyLimit) {
+      // 抽样：只解最后一帧 —— 追加写崩溃留下的损坏几乎都在尾巴上。
+      const last = after.frames.length - 1;
+      zstdDecompressSync(patched.subarray(after.frames[last].start, after.frames[last].end));
+      return 'sampled';
+    }
+    // 全量：每一帧都解一遍，坏帧（校验和/位流损坏）会当场抛错。
+    for (const frame of before.frames) zstdDecompressSync(source.subarray(frame.start, frame.end));
+    return 'full';
+  }
 
   /**
    * 算出一次迁移涉及的全部路径。
@@ -169,6 +252,7 @@ export function createMoveStore(options) {
     if (names.length === 0) {
       throw new MoveError('no-generation', '会话目录里没有可识别的日志文件：' + plan.srcDir);
     }
+    const modes = [];
     for (const name of names) {
       const stagedPath = join(plan.stagingDir, name);
       const staged = await readFile(stagedPath);
@@ -186,24 +270,11 @@ export function createMoveStore(options) {
         throw new MoveError('id-mismatch', '会话日志 ' + name + ' 的 header id 与目标不一致，拒绝改写');
       }
       const patched = replaceFirstLine(staged, JSON.stringify({ ...header, cwd: toCwd }));
-
-      // 自校验：除首行外，明文必须与源文件逐字节一致。
-      const sourceLines = decodeAllFrames(await readFile(join(plan.srcDir, name))).toString('utf8').split('\n');
-      const patchedLines = decodeAllFrames(patched).toString('utf8').split('\n');
-      if (patchedLines[0] === sourceLines[0]) {
-        throw new MoveError('patch-noop', '改写后 header 没有变化（' + name + '），拒绝继续');
-      }
-      if (patchedLines.length !== sourceLines.length) {
-        throw new MoveError('patch-lost-lines', '改写后行数发生变化（' + name + '），拒绝继续');
-      }
-      for (let i = 1; i < sourceLines.length; i++) {
-        if (sourceLines[i] !== patchedLines[i]) {
-          throw new MoveError('patch-differs', '改写后第 ' + String(i + 1) + ' 行与源不一致（' + name + '），拒绝继续');
-        }
-      }
+      // 自校验：除首行外一切不变（小日志全文解码，大日志帧级比对，见 verifyRewrite）。
+      modes.push(verifyRewrite(staged, patched));
       await atomicWrite(stagedPath, patched);
     }
-    return names;
+    return { names, verification: modes.includes('sampled') ? 'sampled' : 'full' };
   }
 
   /** 校验一个目录里每个 generation 的 header id 与 cwd 都对。 */
@@ -355,6 +426,7 @@ export async function relocateSession(host, store, request) {
 
   // release 路径：所有校验都过了才动状态，释放失败就整体放弃、绝不碰文件。
   let released = false;
+  let releaseAttempts = 0;
   if (live && !useHandoff) {
     const outcome = await host.releaseSession(sessionId).catch((error) => ({
       released: false,
@@ -367,6 +439,7 @@ export async function relocateSession(host, store, request) {
       );
     }
     released = true;
+    releaseAttempts = Number.isSafeInteger(outcome.attempts) ? outcome.attempts : 0;
     host.log('info', '已释放会话 ' + sessionId + ' 的写所有权：' + String(outcome.detail));
     if (!existsSync(plan.srcDir)) {
       throw new MoveError('source-dir-missing', '释放之后找不到这个会话的存储目录：' + plan.srcDir);
@@ -394,13 +467,16 @@ export async function relocateSession(host, store, request) {
     try {
       // 只写一次日志（下面不再逐相位重写）：recoverOne 完全按「源在不在、目标在不在」
       // 推导该补哪一步，相位字段对恢复没有作用，逐相位 atomicWrite 是纯开销。
-      await store.stageAndPatch(plan, sessionId, target.path);
+      const staged = await store.stageAndPatch(plan, sessionId, target.path);
+      const verification = staged !== null && staged !== undefined && typeof staged === 'object' && typeof staged.verification === 'string'
+        ? staged.verification
+        : 'full';
       await store.verifyPromoted(plan.stagingDir, sessionId, target.path);
       await mkdir(plan.dstProjectDir, { recursive: true });
       await rename(plan.stagingDir, plan.dstDir);
       promoted = true;
       await rm(plan.srcDir, { recursive: true, force: true });
-      return { ok: true };
+      return { ok: true, verification };
     } catch (error) {
       if (!promoted) {
         // 源目录完好，整体回滚。
@@ -476,7 +552,9 @@ export async function relocateSession(host, store, request) {
       targetTitle: target.title,
       movedTo: plan.dstDir,
       released,
+      releaseAttempts,
       handedOff,
+      verification: outcome.verification !== undefined ? outcome.verification : 'full',
     };
   }
 
@@ -488,7 +566,9 @@ export async function relocateSession(host, store, request) {
     source,
     dstDir: plan.dstDir,
     released,
+    releaseAttempts,
     handedOff,
+    verification: outcome.verification !== undefined ? outcome.verification : 'full',
     handoffWriter: outcome.writerRetargeted === true,
   });
 }
@@ -498,9 +578,19 @@ async function finishAndReport(host, store, ctx) {
   // 就地接管（会话还活着）时不能走 attachSession —— live Session 的 header 是
   // deep-frozen 的旧 cwd，注册表的 cwd 校验一定过不了。所以走 host.adoptSession
   // 这条旁路（它直接改注册表的归属表与路径索引）。
-  const registry = ctx.handedOff === true && typeof host.adoptSession === 'function'
-    ? await host.adoptSession(ctx.sessionId, ctx.target, ctx.source, ctx.target.path)
-    : await finalizeRegistry(host, ctx.sessionId, ctx.target, ctx.source);
+  // 三条路径，优先级从快到慢：
+  //   1. 就地接管：走 adoptSession（live header 冻结，只能旁路写）；
+  //   2. 冷搬移：走 adoptSessions + detachSessions（定向写索引 + 每边一次 mutate，
+  //      **不**重建全量 header 索引 —— 那一步在大库上是白花的）；
+  //   3. 主机没给批量原语（老版本）：退回官方的 refresh + attach + detach。
+  let registry;
+  if (ctx.handedOff === true && typeof host.adoptSession === 'function') {
+    registry = await host.adoptSession(ctx.sessionId, ctx.target, ctx.source, ctx.target.path);
+  } else if (typeof host.adoptSessions === 'function' && typeof host.detachSessions === 'function') {
+    registry = await adoptCold(host, ctx.sessionId, ctx.target, ctx.source);
+  } else {
+    registry = await finalizeRegistry(host, ctx.sessionId, ctx.target, ctx.source);
+  }
   if (registry.applied) {
     await store.removeJournal(ctx.opId).catch(() => {});
     await store.dropStaging(ctx.opId).catch(() => {});
@@ -516,9 +606,11 @@ async function finishAndReport(host, store, ctx) {
       movedTo: ctx.dstDir,
       applied: 'live',
       released: ctx.released === true,
+      releaseAttempts: Number.isSafeInteger(ctx.releaseAttempts) ? ctx.releaseAttempts : 0,
       handedOff: ctx.handedOff === true,
       handoffWriter: ctx.handoffWriter === true,
       headerIndexRefreshed: registry.refreshed === true,
+      verification: ctx.verification !== undefined ? ctx.verification : 'full',
     };
   }
   // 磁盘已就位，但归属没写成：保留日志，下次桥接调用或下次启动自动补齐。
@@ -535,8 +627,27 @@ async function finishAndReport(host, store, ctx) {
     applied: 'pending',
     released: ctx.released === true,
     handedOff: ctx.handedOff === true,
+    verification: ctx.verification !== undefined ? ctx.verification : 'full',
     pendingReason: registry.reason,
   };
+}
+
+/**
+ * 冷搬移的归属写入：定向更新本会话的 header 缓存/路径索引，然后目标、源各一次 mutate。
+ * 和批量 commit 用的是同一组原语，只是这里只有一条。
+ */
+async function adoptCold(host, sessionId, target, source) {
+  const adopted = await host.adoptSessions([sessionId], target, target.path);
+  if (adopted === undefined || adopted === null || adopted.applied !== true) {
+    return { applied: false, refreshed: false, reason: adopted !== null && adopted !== undefined && typeof adopted.reason === 'string' ? adopted.reason : '写入目标工作区归属失败' };
+  }
+  if (source !== undefined && source.id !== target.id) {
+    const detached = await host.detachSessions([sessionId], source);
+    if (detached !== undefined && detached !== null && detached.applied === false) {
+      return { applied: false, refreshed: false, reason: typeof detached.reason === 'string' ? detached.reason : '从源工作区摘除失败' };
+    }
+  }
+  return { applied: true, refreshed: false };
 }
 
 /**

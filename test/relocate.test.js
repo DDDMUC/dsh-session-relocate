@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { zstdCompressSync } from 'node:zlib';
 import { encodeSegment, projectDir } from '../src/paths.js';
-import { decodeAllFrames, readFirstLine } from '../src/zstd.js';
+import { decodeAllFrames, readFirstLine, scanZstdFrames } from '../src/zstd.js';
 import { commitMoves, recoverPendingMoves, relocateSession, MoveError } from '../src/relocate.js';
 import {
   SESSION_ID, COMPRESS, makeFixture, makeLog, makePlainLog,
@@ -22,7 +22,8 @@ test('正常迁移：源目录消失、目标就位、header 改成目标 cwd、
   assert.equal(receipt.applied, 'live');
   assert.equal(receipt.to, fixture.dstWs);
   assert.equal(receipt.targetTitle, '目标工作区');
-  assert.equal(receipt.headerIndexRefreshed, true);
+  assert.equal(receipt.headerIndexRefreshed, false, '定向写入不再重建全量 header 索引');
+  assert.equal(receipt.verification, 'full', '小日志走全文解码校验');
 
   assert.ok(!existsSync(fixture.srcDir), '源目录必须被删除');
   assert.ok(existsSync(fixture.dstDir), '目标目录必须就位');
@@ -38,7 +39,11 @@ test('正常迁移：源目录消失、目标就位、header 改成目标 cwd、
   const gotLines = decodeAllFrames(after).toString('utf8').split('\n');
   assert.deepEqual(gotLines.slice(1), wantLines.slice(1), '除首行外的历史必须一字节不差');
 
-  assert.deepEqual(fixture.calls, [['refresh'], ['attach', 'ws-dst', SESSION_ID], ['detach', 'ws-src', SESSION_ID]]);
+  // 冷搬移现在走定向归属写入：目标、源各一次 mutate，不再重建全量 header 索引。
+  assert.deepEqual(fixture.calls, [
+    ['adopt-batch', 'ws-dst', SESSION_ID],
+    ['detach-batch', 'ws-src', SESSION_ID],
+  ]);
   assert.deepEqual(fixture.projections, [SESSION_ID]);
   assert.equal(journalCount(fixture), 0);
   assert.equal(stagingCount(fixture), 0);
@@ -76,9 +81,8 @@ test('打开中但空闲：先释放再搬，且释放排在动文件之前', as
   assert.equal(fixture.state.live, false, '释放后该会话不该再是 live');
   assert.deepEqual(fixture.calls, [
     ['release', SESSION_ID],
-    ['refresh'],
-    ['attach', 'ws-dst', SESSION_ID],
-    ['detach', 'ws-src', SESSION_ID],
+    ['adopt-batch', 'ws-dst', SESSION_ID],
+    ['detach-batch', 'ws-src', SESSION_ID],
   ]);
   assert.ok(!existsSync(fixture.srcDir));
   assert.ok(existsSync(fixture.dstDir));
@@ -272,14 +276,9 @@ test('用目录路径作为目标时会先注册新工作区', async () => {
 test('注册表收尾失败时磁盘已就位、日志保留，之后可自动补齐', async () => {
   const fixture = makeFixture('pending-registry');
   const store = fixture.makeStore();
+  // 让定向归属写入失败（模拟注册表拒绝），磁盘部分必须已经完成、日志必须保留。
   const failing = Object.create(fixture.host);
-  failing.refreshHeaderIndex = async () => false;
-  const brokenTarget = {
-    id: 'ws-dst', path: fixture.dstWs, title: '目标工作区',
-    attachSession: async () => { throw new Error('stale header index'); },
-    detachSession: async () => {},
-  };
-  failing.getWorkspace = (id) => (id === 'ws-dst' ? brokenTarget : undefined);
+  failing.adoptSessions = async () => ({ applied: false, reason: 'stale header index' });
 
   const receipt = await relocateSession(failing, store, { sessionId: SESSION_ID, targetWorkspaceId: 'ws-dst' });
   assert.equal(receipt.applied, 'pending');
@@ -342,5 +341,56 @@ test('commitMoves：注册表写失败时保留日志，不假装成功', async 
   assert.equal(result.ok, false);
   assert.match(result.message, /自动补齐|归属/);
   assert.equal(journalCount(fixture), 1, '日志必须留着让 recoverOne 补完归属');
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
+/** 把源日志里第 index 个帧的载荷拧坏一个字节（帧头保持合法，扫帧仍能扫出来）。 */
+function corruptFrame(fixture, index) {
+  const file = join(fixture.srcDir, 'session.v4.jsonl.zstd');
+  const buffer = readFileSync(file);
+  const scan = scanZstdFrames(buffer);
+  const frame = scan.frames[index];
+  if (frame === undefined) throw new Error('没有第 ' + String(index) + ' 帧');
+  const at = Math.min(frame.end - 2, frame.start + 20);
+  buffer[at] = buffer[at] ^ 0xff;
+  writeFileSync(file, buffer);
+}
+
+test('A2：小日志走全文解码，中间帧损坏时拒绝搬移', async () => {
+  const fixture = makeFixture('verify-full-corrupt');
+  corruptFrame(fixture, 1);
+  const store = fixture.makeStore();
+  await assert.rejects(
+    () => relocateSession(fixture.host, store, { sessionId: SESSION_ID, targetWorkspaceId: 'ws-dst' }),
+    /迁移失败|corrupt|解压|Zstd|checksum|invalid/i,
+  );
+  assert.ok(existsSync(fixture.srcDir), '拒绝时源目录必须原样保留');
+  assert.equal(journalCount(fixture), 0, '回滚后不能留下日志');
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
+test('A2：超过阈值的日志走抽样校验（帧级比对 + 解头解尾），回执里明确标注', async () => {
+  const fixture = makeFixture('verify-sampled');
+  corruptFrame(fixture, 1);
+  // 阈值设成 1 字节：这份小日志也走抽样路径，方便验证行为而不是造大文件。
+  const store = fixture.makeStore({ fullVerifyLimit: 1 });
+  const receipt = await relocateSession(fixture.host, store, { sessionId: SESSION_ID, targetWorkspaceId: 'ws-dst' });
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.verification, 'sampled', '抽样校验必须在回执里标出来');
+  assert.ok(existsSync(fixture.dstDir));
+  assert.ok(!existsSync(fixture.srcDir));
+  assertSingleOccurrence(fixture);
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
+test('A2：verify=full 时忽略大小阈值，一律全文解码', async () => {
+  const fixture = makeFixture('verify-force-full');
+  corruptFrame(fixture, 1);
+  const store = fixture.makeStore({ verify: 'full', fullVerifyLimit: 1 });
+  await assert.rejects(
+    () => relocateSession(fixture.host, store, { sessionId: SESSION_ID, targetWorkspaceId: 'ws-dst' }),
+    /迁移失败|corrupt|解压|Zstd|checksum|invalid/i,
+  );
+  assert.ok(existsSync(fixture.srcDir));
   rmSync(fixture.base, { recursive: true, force: true });
 });

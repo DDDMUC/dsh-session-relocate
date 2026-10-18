@@ -219,6 +219,11 @@ export function apply(ctx, config) {
     journalsDir,
     sessionDirFor,
     log,
+    // 校验强度：auto（小日志全文解码，大日志帧级抽样）或 full（永远全文解码）。
+    verify: settings.verify === 'full' ? 'full' : 'auto',
+    fullVerifyLimit: Number.isSafeInteger(settings.fullVerifyLimit) && settings.fullVerifyLimit > 0
+      ? settings.fullVerifyLimit
+      : undefined,
   });
 
   /** 组装一次迁移需要的 DSH 运行时能力。 */
@@ -421,10 +426,10 @@ export function apply(ctx, config) {
       async releaseSession(sessionId) {
         const sessions = ctx.get('sessions');
         if (sessions === undefined || typeof sessions.get !== 'function') {
-          return { released: true, detail: '没有 sessions 服务，视为无需释放' };
+          return { released: true, attempts: 0, detail: '没有 sessions 服务，视为无需释放' };
         }
         const live = sessions.get(sessionId);
-        if (live === undefined) return { released: true, detail: '本来就不在内存里' };
+        if (live === undefined) return { released: true, attempts: 0, detail: '本来就不在内存里' };
 
         if (typeof sessions.flush === 'function') {
           try {
@@ -437,12 +442,15 @@ export function apply(ctx, config) {
         const entries = sessions.store;
         const entered = entries !== undefined && typeof entries.get === 'function' ? entries.get(sessionId) : undefined;
         if (entered === undefined || typeof entered.detach !== 'function') {
-          return { released: false, detail: '拿不到可释放的 entered 记录（DSH 版本可能变了）' };
+          return { released: false, attempts: 0, detail: '拿不到可释放的 entered 记录（DSH 版本可能变了）' };
         }
         entered.detach();
 
         const persistence = ctx.sessionPersistence;
-        if (typeof persistence.open !== 'function') return { released: true, detail: '已从内存摘除（没有 open 可探测）' };
+        if (typeof persistence.open !== 'function') return { released: true, attempts: 0, detail: '已从内存摘除（没有 open 可探测）' };
+        // 前几次探得很快（正常情况 detach 完立刻就能拿到租约），之后退回常规间隔。
+        // 这样"正常情况"几乎零等待，"被 GUI 抢着"时也仍然能等到，且总时长不变。
+        const quickDelays = [0, 10, 25, 50, 100];
         let last = 'unknown';
         for (let attempt = 0; attempt <= releaseRetries; attempt++) {
           let handle;
@@ -451,7 +459,8 @@ export function apply(ctx, config) {
           } catch (error) {
             last = String(error && error.message !== undefined ? error.message : error);
             if (attempt === releaseRetries) break;
-            await sleep(releaseRetryDelayMs);
+            const delay = attempt < quickDelays.length ? quickDelays[attempt] : releaseRetryDelayMs;
+            if (delay > 0) await sleep(delay);
             continue;
           }
           try {
@@ -459,9 +468,9 @@ export function apply(ctx, config) {
           } catch (error) {
             log('warn', '探针句柄关闭失败（不影响结论）：' + String(error && error.message));
           }
-          return { released: true, detail: '写租约已释放（第 ' + String(attempt + 1) + ' 次探测拿到写所有权）' };
+          return { released: true, attempts: attempt + 1, detail: '写租约已释放（第 ' + String(attempt + 1) + ' 次探测拿到写所有权）' };
         }
-        return { released: false, detail: '写所有权仍被占用：' + last };
+        return { released: false, attempts: releaseRetries + 1, detail: '写所有权仍被占用（试了 ' + String(releaseRetries + 1) + ' 次）：' + last };
       },
       /**
        * 重建注册表的 header 缓存。
@@ -648,6 +657,7 @@ export function apply(ctx, config) {
       selftest,
       // 批量搬移的两段式（defer 文件事务 + 一次 commit 写注册表）由客户端按这个能力位决定是否启用。
       bulkDefer: true,
+      verify: settings.verify === 'full' ? 'full' : 'auto',
       sessionsRoot: store.sessionsRoot,
       journalsDir: store.journalsDir,
       pending: journals.map((journal) => ({
