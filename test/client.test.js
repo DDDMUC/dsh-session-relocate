@@ -811,16 +811,26 @@ test('批量：apply 把契约合并进引导全局（不覆盖 prefix），并�
   globalThis.document = dom.doc;
   installBulkGlobals();
   let registered = 0;
+  const slots = [];
   api.apply({
     effect() {},
-    slots: { inject(name, factory) { registered += 1; const value = factory(); return typeof value === 'function' ? value : () => {}; }, register() { return () => {}; } },
+    slots: {
+      inject(name, factory) {
+        registered += 1;
+        slots.push(name);
+        const value = factory();
+        return typeof value === 'function' ? value : () => {};
+      },
+      register() { return () => {}; },
+    },
   });
   const contract = globalThis.__DSH_SESSION_RELOCATE__;
   assert.equal(contract.prefix, PREFIX, '主机注入的 prefix 不能被覆盖');
   assert.equal(contract.supportsBulkMove, true);
   assert.equal(typeof contract.moveSelection, 'function');
   assert.ok(dom.dispatched.some((event) => event.type === 'dsh-session-relocate:ready'), '应当派发 ready 事件');
-  assert.equal(registered, 1, '只 inject 一次 slot（里面注册两个条目）');
+  assert.deepEqual(slots, ['plugins.row.config', 'plugins.bundle.config', 'sidebar.workspaces.session.menu.item'], '三处注入：行配置页 + 包配置页 + 会话菜单');
+  assert.equal(registered, 3, '三个 slot 各注入一次');
   delete globalThis.document;
 });
 
@@ -977,4 +987,39 @@ test('多选目标面板：按归属算「将移动 M / 跳过 K」，全部已�
     { moved: 1, skipped: 0, disabled: false },
     '归属未知（行没渲染）按「会搬」处理，保守',
   );
+});
+
+test('拖动：关掉「连同子对话」后，单条搬移显式传 includeChildren:false', async () => {
+  globalThis.localStorage = { getItem: () => 'false', setItem() {} };
+  const harness = await mountDrag({ '/move': () => ({ ok: true, applied: 'live', targetTitle: '目标' }) });
+  const src = makeGroup('ws-src', [SESSION_ID]);
+  const dst = makeGroup('ws-dst', [OTHER_SESSION]);
+  makeTree([src, dst]);
+
+  harness.drag.onDragStart(makeEvent(rowsIn(src, 'session:')[0]));
+  harness.drag.onDrop(makeEvent(rowsIn(dst, 'session:')[0]));
+  const moves = harness.calls.filter((call) => call.url === PREFIX + '/move');
+  assert.deepEqual(moves[0].body, { sessionId: SESSION_ID, targetWorkspaceId: 'ws-dst', includeChildren: false }, '显式告诉主机只搬父');
+  delete globalThis.localStorage;
+  delete globalThis.document;
+});
+
+test('设置页：连同子对话开关默认开，点一下写入关闭', async () => {
+  const writes = [];
+  const store = { value: null };
+  globalThis.localStorage = {
+    getItem: () => store.value,
+    setItem: (key, value) => { writes.push([key, value]); store.value = value; },
+  };
+  const harness = await mount({});
+  const node = harness.api.__settings.ChildrenSetting({});
+  assert.equal(node.props.className, 'dshsm-setting');
+  const toggle = node.children[1];
+  assert.equal(toggle.props.role, 'switch');
+  assert.equal(toggle.props['aria-checked'], 'true', '默认开');
+  toggle.props.onClick();
+  assert.deepEqual(writes, [['dsh-session-relocate.includeChildren', 'false']], '点一下关掉并持久化');
+  assert.equal(harness.api.__settings.wantChildren(), false);
+  delete globalThis.localStorage;
+  delete globalThis.document;
 });

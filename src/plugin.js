@@ -115,6 +115,37 @@ function failure(error) {
 }
 
 /**
+ * 从全部会话快照里找出 rootId 的**所有后代**（按 header.parentSession 递归）。
+ * 子代理会话在侧边栏是隐藏的，只能靠 header 关系找；孤儿（父不存在）自然找不到。
+ *
+ * @param snapshots - `sessionPersistence.list()` 的返回（每项至少带 `header`）。
+ * @param rootId - 父会话 id。
+ * @returns 后代 id（不含 root），按层序。
+ */
+export function descendantIdsOf(snapshots, rootId) {
+  const out = [];
+  const seen = new Set([rootId]);
+  let frontier = [rootId];
+  const all = Array.isArray(snapshots) ? snapshots : [];
+  while (frontier.length > 0) {
+    const next = [];
+    for (const snapshot of all) {
+      const header = snapshot !== null && typeof snapshot === 'object' ? snapshot.header : null;
+      if (header === null || header === undefined || typeof header !== 'object') continue;
+      if (typeof header.parentSession !== 'string' || frontier.indexOf(header.parentSession) < 0) continue;
+      // 只认子代理会话（与 DSH 自己 sessionVisible 的过滤一致）；分支/分叉是可见会话，不跟着搬。
+      if (header.origin !== 'subagent') continue;
+      if (typeof header.id !== 'string' || seen.has(header.id)) continue;
+      seen.add(header.id);
+      out.push(header.id);
+      next.push(header.id);
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+/**
  * 挂载插件。
  *
  * @param ctx - cordis 上下文。
@@ -232,6 +263,21 @@ export function apply(ctx, config) {
     return {
       async statSession(sessionId) {
         return await ctx.sessionPersistence.stat(sessionId);
+      },
+      /**
+       * 全部会话快照（含隐藏的子代理会话）—— 用来找 `parentSession` 后代。
+       * 后端不支持或读失败时返回空数组：父会话照常搬，只是不带子。
+       */
+      async listSessions() {
+        const persistence = ctx.sessionPersistence;
+        if (persistence === undefined || persistence === null || typeof persistence.list !== 'function') return [];
+        try {
+          const snapshots = await persistence.list();
+          return Array.isArray(snapshots) ? snapshots : [];
+        } catch (error) {
+          log('warn', '列会话失败，按没有子对话继续：' + String(error && error.message));
+          return [];
+        }
       },
       getWorkspace(workspaceId) {
         return registry.get(workspaceId);
@@ -611,7 +657,8 @@ export function apply(ctx, config) {
     const targetWorkspaceId = typeof body.targetWorkspaceId === 'string' ? body.targetWorkspaceId : '';
     const targetPath = typeof body.targetPath === 'string' ? body.targetPath.trim() : '';
     try {
-      const receipt = await relocateSession(buildHost(), store, {
+      const host = buildHost();
+      const receipt = await relocateSession(host, store, {
         sessionId,
         targetWorkspaceId,
         targetPath,
@@ -620,11 +667,61 @@ export function apply(ctx, config) {
         // 批量搬移时客户端逐条 defer：文件事务各自做完，注册表最后一次性写。
         deferRegistry: body.deferRegistry === true,
       });
-      return { ok: true, ...receipt };
+      // 「连同子对话」默认开；客户端在用户关掉开关时会显式传 false。
+      // 子会话走**完整**事务（文件 + 归属），每条失败按条隔离，不拖累父回执。
+      let children;
+      if (body.includeChildren !== false) {
+        const snapshots = await host.listSessions();
+        const childIds = descendantIdsOf(snapshots, sessionId);
+        if (childIds.length > 0) children = await moveChildren(host, childIds, body);
+      }
+      return children === undefined ? { ok: true, ...receipt } : { ok: true, ...receipt, children };
     } catch (error) {
       log('warn', '迁移失败：' + String(error && error.message));
       return failure(error);
     }
+  }
+
+  /**
+   * 把父会话的全部后代（子代理会话）搬到同一个目标。
+   * 每个子会话走完整事务（文件 + 归属）；失败按条隔离，父会话的成功回执不受影响。
+   */
+  async function moveChildren(host, ids, body) {
+    const results = [];
+    let moved = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const id of ids) {
+      try {
+        await relocateSession(host, store, {
+          sessionId: id,
+          targetWorkspaceId: body.targetWorkspaceId,
+          targetPath: body.targetPath,
+          releaseLive,
+          moveLive,
+          // 子会话不参与两段式：条数少，直接落归属，避免 commit 回执里混进子 id。
+          deferRegistry: false,
+        });
+        moved += 1;
+        results.push({ sessionId: id, status: 'moved' });
+      } catch (error) {
+        if (error !== null && typeof error === 'object' && error.code === 'already-there') {
+          skipped += 1;
+          results.push({ sessionId: id, status: 'skipped', message: String(error.message) });
+        } else {
+          failed += 1;
+          results.push({
+            sessionId: id,
+            status: 'failed',
+            code: error !== null && typeof error === 'object' && typeof error.code === 'string' ? error.code : 'failed',
+            message: String(error !== null && typeof error === 'object' && typeof error.message === 'string'
+              ? error.message
+              : error),
+          });
+        }
+      }
+    }
+    return { total: ids.length, moved, failed, skipped, results };
   }
 
   /** 批量收尾：把一串 defer 过的迁移的归属一次性写进注册表。 */

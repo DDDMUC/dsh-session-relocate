@@ -9,7 +9,7 @@ import { Readable } from 'node:stream';
 import { join } from 'node:path';
 import { encodeSegment, projectDir } from '../src/paths.js';
 import { readFirstLine } from '../src/zstd.js';
-import { apply } from '../src/plugin.js';
+import { apply, descendantIdsOf } from '../src/plugin.js';
 import { SESSION_ID, makeFixture, assertSingleOccurrence } from './helpers.js';
 
 /** 造一个够用的假 cordis ctx，并把 webServer 注册到的路由抓出来。 */
@@ -457,3 +457,20 @@ test('版本号：/status 报的就是 package.json 的版本（防止再写两�
   rmSync(fixture.base, { recursive: true, force: true });
 });
 
+
+test('子对话：descendantIdsOf 沿 parentSession 递归、按层序、不串门', () => {
+  const snapshots = [
+    { header: { id: 'p' } },
+    { header: { id: 'c1', parentSession: 'p', origin: 'subagent' } },
+    { header: { id: 'c2', parentSession: 'p', origin: 'subagent' } },
+    { header: { id: 'g1', parentSession: 'c1', origin: 'subagent' } },
+    { header: { id: 'fork', parentSession: 'p' } },
+    { header: { id: 'x', parentSession: 'other', origin: 'subagent' } },
+    { header: { id: 'orphan' } },
+    null,
+  ];
+  assert.deepEqual(descendantIdsOf(snapshots, 'p'), ['c1', 'c2', 'g1']);
+  assert.deepEqual(descendantIdsOf(snapshots, 'c1'), ['g1']);
+  assert.deepEqual(descendantIdsOf(snapshots, 'nobody'), []);
+  assert.deepEqual(descendantIdsOf(undefined, 'p'), []);
+});
