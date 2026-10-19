@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-relocate",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "跨工作区移动 DSH 对话：把某个 Session 的日志文件与工作区归属整体搬到另一个工作区（可自动注册新工作区）。带日志级崩溃恢复的安全事务，并且会先安全释放「已打开但空闲」的会话 —— 所以正在打开的对话也能直接搬，不需要重启 DSH。",
   "type": "module",
   "main": "src/plugin.js",
