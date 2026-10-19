@@ -955,3 +955,26 @@ test('批量：移动被取消时保留选中、不退出多选', async () => {
   assert.equal(bulk.state.moveNode.disabled, false);
   delete globalThis.document;
 });
+
+test('多选目标面板：按归属算「将移动 M / 跳过 K」，全部已在目标里的项置灰', async () => {
+  const harness = await mount({});
+  const owners = { a: 'ws-1', b: 'ws-1', c: 'ws-2' };
+  const ownerOf = (id) => (Object.prototype.hasOwnProperty.call(owners, id) ? owners[id] : null);
+  const spaces = [{ id: 'ws-1' }, { id: 'ws-2' }, { id: 'ws-3' }];
+  const plans = harness.api.__bulk.planTargetsWith(['a', 'b', 'c'], spaces, ownerOf);
+  assert.deepEqual(plans.map((p) => ({ id: p.workspace.id, moved: p.moved, skipped: p.skipped, disabled: p.disabled })), [
+    { id: 'ws-1', moved: 1, skipped: 2, disabled: false },
+    { id: 'ws-2', moved: 2, skipped: 1, disabled: false },
+    { id: 'ws-3', moved: 3, skipped: 0, disabled: false },
+  ]);
+
+  const allHere = harness.api.__bulk.planTargetsWith(['a', 'b'], [{ id: 'ws-1' }], ownerOf);
+  assert.equal(allHere[0].disabled, true, '全部已在目标里 → 置灰，点了也不发请求');
+
+  const unknown = harness.api.__bulk.planTargetsWith(['x'], [{ id: 'ws-1' }], () => null);
+  assert.deepEqual(
+    { moved: unknown[0].moved, skipped: unknown[0].skipped, disabled: unknown[0].disabled },
+    { moved: 1, skipped: 0, disabled: false },
+    '归属未知（行没渲染）按「会搬」处理，保守',
+  );
+});
