@@ -410,7 +410,7 @@ async function mountDrag(routes) {
   globalThis.__DSH_SESSION_RELOCATE__ = { prefix: PREFIX };
   Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true });
   const uninstall = api.__drag.installDrag();
-  return { drag: api.__drag, listeners, calls: fetchHarness.calls, uninstall, doc, hostMarks, dispatched };
+  return { api, drag: api.__drag, listeners, calls: fetchHarness.calls, uninstall, doc, hostMarks, dispatched };
 }
 
 const OTHER_SESSION = 'session-other-0000-4000-8000-000000000002';
@@ -720,6 +720,21 @@ test('拖动：多选里没选中的行被拖时只搬它自己', async () => {
   assert.equal(moves[0].body.sessionId, SESSION_ID);
   assert.equal(moves[0].body.deferRegistry, undefined, '单条不走两段式');
   assert.equal(harness.dispatched.length, 0, '没选中它就不该动宿主的选中态');
+  delete globalThis.document;
+});
+
+test('选择面板：按页面文字亮度选深/浅色，不依赖可能缺失的主题 token', async () => {
+  const harness = await mountDrag({});
+  assert.equal(typeof harness.api.__ui, 'object', '主题判定要暴露给测试');
+
+  globalThis.getComputedStyle = () => ({ color: 'rgb(240, 240, 240)' });
+  assert.equal(harness.api.__ui.themeClass(), 'dshsm-dark', '浅色字 = 深色主题');
+
+  globalThis.getComputedStyle = () => ({ color: 'rgb(15, 17, 21)' });
+  assert.equal(harness.api.__ui.themeClass(), 'dshsm-light', '深色字 = 浅色主题');
+
+  delete globalThis.getComputedStyle;
+  assert.equal(harness.api.__ui.themeClass(), 'dshsm-dark', '拿不到样式时退回深色（深底浅字仍可读）');
   delete globalThis.document;
 });
 
