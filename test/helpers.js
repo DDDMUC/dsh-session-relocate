@@ -102,6 +102,7 @@ export function makeFixture(name, group = 'relocate') {
       id,
       path,
       title,
+      sessionIds: [],
       async attachSession(sessionId) {
         const file = headerFileIn(directoryOf(path));
         if (file === undefined) throw new Error('cannot attach ' + sessionId + ': no log under ' + directoryOf(path));
@@ -116,6 +117,8 @@ export function makeFixture(name, group = 'relocate') {
   }
 
   const srcEntity = makeEntity('ws-src', srcWs, '源工作区');
+  // 现实里会话创建时就登记在所属工作区；孤儿场景由测试自己把它摘掉。
+  srcEntity.sessionIds.push(SESSION_ID);
   const dstEntity = makeEntity('ws-dst', dstWs, '目标工作区');
   const extraEntity = makeEntity('ws-extra', extraWs, '别的');
 

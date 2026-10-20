@@ -868,6 +868,26 @@ test('批量：runBulkMove 逐条 defer + 一次 commit、逐条分类、进度 
   assert.equal(result.results[2].code, 'session-active');
 });
 
+test('批量：applied=attached 的直接算已搬，不 defer、不 commit', async () => {
+  const api = await makeBulkApi();
+  installBulkGlobals();
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push({ url, body });
+    if (url.endsWith('/status')) return { status: 200, json: async () => ({ ok: true, bulkDefer: true }) };
+    if (url.endsWith('/move')) return { status: 200, json: async () => ({ ok: true, applied: 'attached', targetTitle: '源工作区' }) };
+    if (url.endsWith('/move-commit')) return { status: 200, json: async () => ({ ok: true, results: body.sessionIds.map((id) => ({ sessionId: id, status: 'moved' })) }) };
+    return { status: 200, json: async () => ({ ok: false }) };
+  };
+  const result = await api.__bulk.runBulkMove(['session-orphan-1'], 'ws-src', {});
+  assert.equal(result.moved, 1, '补归属也算这一条成功');
+  assert.equal(result.failed, 0);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.results[0].applied, 'attached');
+  assert.equal(calls.some((call) => call.url.endsWith('/move-commit')), false, '没有文件事务，不该进 commit');
+});
+
 test('批量：老主机没有 bulkDefer 时退回逐条单发（不调 /move-commit）', async () => {
   const api = await makeBulkApi();
   installBulkGlobals();

@@ -347,6 +347,28 @@ export function newOpId() {
  *   ``releaseLive`` 为 false 时恢复旧行为（打开中的会话直接拒绝）。
  * @returns 迁移回执。
  */
+/**
+ * 会话目录已经在目标工作区的 path 上、但注册表里没有这条归属时，补写归属（不动文件）。
+ *
+ * 「cwd 相同」不等于「已在目标工作区」：DSH 的分组依据是 workspace.json 的 sessionIds，
+ * 两者可以不一致（本次的孤儿/未分组会话）。优先走 host.adoptSession（live/frozen header
+ * 的旁路），老宿主退回 adoptSessions + detachSessions。
+ */
+async function attachExisting(host, sessionId, target, source) {
+  if (typeof host.adoptSession === 'function') {
+    return await host.adoptSession(sessionId, target, source, target.path);
+  }
+  if (typeof host.adoptSessions === 'function') {
+    const adopted = await host.adoptSessions([sessionId], target, target.path);
+    if (adopted !== null && adopted !== undefined && adopted.applied === true
+      && source !== undefined && source.id !== target.id && typeof host.detachSessions === 'function') {
+      await host.detachSessions([sessionId], source);
+    }
+    return adopted;
+  }
+  return { applied: false, reason: '宿主没有提供补写归属的接口' };
+}
+
 export async function relocateSession(host, store, request) {
   const sessionId = request.sessionId;
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -383,7 +405,33 @@ export async function relocateSession(host, store, request) {
     throw new MoveError('source-cwd-unresolved', '这个对话记录的目录已不存在：' + header.cwd + '，无法安全迁移。');
   }
   if (samePath(sourceCanonical, target.path)) {
-    throw new MoveError('already-there', '这个对话已经在「' + target.title + '」里了。');
+    // 目录相同 ≠ 已在目标工作区：DSH 的分组依据是注册表 sessionIds。
+    // 目录在、归属不在（孤儿/未分组）时这是一次**可修复**的状态，不能当成终态。
+    const member = Array.isArray(target.sessionIds) && target.sessionIds.indexOf(sessionId) >= 0;
+    if (member) throw new MoveError('already-there', '这个对话已经在「' + target.title + '」里了。');
+    const source = host.findWorkspaceByPath(sourceCanonical);
+    const attached = await attachExisting(host, sessionId, target, source);
+    if (attached !== null && attached !== undefined && attached.applied === true) {
+      if (typeof host.invalidateProjection === 'function') await host.invalidateProjection(sessionId);
+      return {
+        ok: true,
+        sessionId,
+        from: sourceCanonical,
+        to: target.path,
+        targetWorkspaceId: target.id,
+        targetTitle: target.title,
+        applied: 'attached',
+        released: false,
+        handedOff: false,
+        verification: 'full',
+      };
+    }
+    throw new MoveError(
+      'attach-failed',
+      '这个对话的目录已经在「' + target.title + '」里，但补写工作区归属失败：'
+        + String(attached !== null && attached !== undefined && attached.reason !== undefined ? attached.reason : '未知原因')
+        + '。请重启 DSH 后再试。',
+    );
   }
 
   // 三种情况：

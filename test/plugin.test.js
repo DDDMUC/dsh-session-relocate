@@ -86,6 +86,8 @@ function makeCtx(fixture, config) {
   }
 
   makeEntity('ws-src', fixture.srcWs, '源工作区');
+  // 现实里会话创建时就登记在所属工作区；孤儿场景由测试自己把它摘掉。
+  workspaces[0].record.sessionIds.push(SESSION_ID);
   makeEntity('ws-dst', fixture.dstWs, '目标工作区');
 
   const sctx = {
@@ -237,10 +239,35 @@ test('describe：带 sessionId 时给出当前工作区与可迁移性', async (
   assert.equal(result.json.ok, true);
   assert.equal(result.json.session.canMove, true);
   assert.equal(result.json.session.currentWorkspaceId, 'ws-src');
+  assert.equal(result.json.session.memberOfWorkspaceId, 'ws-src');
+  assert.equal(result.json.session.cwdMatchesWorkspaceId, 'ws-src');
+  assert.equal(result.json.session.currentWorkspaceBy, 'membership');
   assert.equal(result.json.session.reason, null);
   assert.equal(result.json.session.live, false);
   const current = result.json.workspaces.filter((workspace) => workspace.current);
   assert.deepEqual(current.map((workspace) => workspace.id), ['ws-src']);
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
+test('describe / move：cwd 在 DSH 但注册表没归属 → 不算当前工作区，move 补归属', async () => {
+  const fixture = makeFixture('plugin-describe-orphan', 'plugin');
+  const harness = makeCtx(fixture, { sessionsRoot: fixture.sessionsRoot, journalsDir: fixture.journalsDir, home: fixture.base });
+  const src = harness.workspaces.find((entity) => entity.id === 'ws-src');
+  src.record.sessionIds.length = 0;
+
+  const described = await call(routeFor(harness.routes, '/describe'), 'POST', { sessionId: SESSION_ID });
+  assert.equal(described.json.session.currentWorkspaceId, null, '没归属就不该标成当前工作区');
+  assert.equal(described.json.session.memberOfWorkspaceId, null);
+  assert.equal(described.json.session.cwdMatchesWorkspaceId, 'ws-src');
+  assert.equal(described.json.session.currentWorkspaceBy, null, '没有归属就没有「当前工作区」');
+  assert.deepEqual(described.json.workspaces.filter((workspace) => workspace.current), [], 'DSH 必须留在目标列表里');
+
+  const moved = await call(routeFor(harness.routes, '/move'), 'POST', { sessionId: SESSION_ID, targetWorkspaceId: 'ws-src' });
+  assert.equal(moved.status, 200);
+  assert.equal(moved.json.ok, true);
+  assert.equal(moved.json.applied, 'attached');
+  assert.equal(moved.json.targetWorkspaceId, 'ws-src');
+  assert.ok(harness.calls.some((entry) => entry[0] === 'mutate' && entry[1] === 'ws-src'), '应当把归属写进注册表');
   rmSync(fixture.base, { recursive: true, force: true });
 });
 

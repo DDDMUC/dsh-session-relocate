@@ -148,6 +148,22 @@ test('拒绝：已经在目标工作区', async () => {
   rmSync(fixture.base, { recursive: true, force: true });
 });
 
+test('路径已在目标、但注册表没有归属：补归属，不当作 already-there', async () => {
+  const fixture = makeFixture('attach-orphan');
+  const store = fixture.makeStore();
+  // 模拟孤儿：目录在源工作区的 cwd 下，但不在 DSH 的 sessionIds 里。
+  fixture.srcEntity.sessionIds.length = 0;
+  const receipt = await relocateSession(fixture.host, store, { sessionId: SESSION_ID, targetWorkspaceId: 'ws-src' });
+  assert.equal(receipt.applied, 'attached');
+  assert.equal(receipt.targetWorkspaceId, 'ws-src');
+  assert.equal(receipt.targetTitle, '源工作区');
+  assert.deepEqual(fixture.calls, [['adopt-batch', 'ws-src', SESSION_ID]], '同源：只补归属，不 detach');
+  assert.equal(journalCount(fixture), 0, '没动文件就不该有迁移日志');
+  assert.equal(existsSync(join(fixture.srcDir, 'session.v4.jsonl.zstd')), true, '文件原地不动');
+  assert.deepEqual(fixture.projections, [SESSION_ID], '归属补上后清掉投影缓存');
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
 test('拒绝：不存在的会话 / 不存在的工作区 / 没有目标', async () => {
   const fixture = makeFixture('bad-targets');
   const store = fixture.makeStore();

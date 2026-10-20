@@ -582,7 +582,8 @@ export function apply(ctx, config) {
   /** 描述当前状态：可选带一个 sessionId，用来告诉界面「能不能搬、为什么不能」。 */
   async function describe(body) {
     const registry = ctx.workspaceRegistry;
-    const workspaces = registry.list().map((entity) => ({ id: entity.id, title: entity.title, path: entity.path }));
+    const entities = registry.list();
+    const workspaces = entities.map((entity) => ({ id: entity.id, title: entity.title, path: entity.path }));
     const payload = {
       ok: true,
       version: PLUGIN_VERSION,
@@ -616,9 +617,12 @@ export function apply(ctx, config) {
         canonical = undefined;
       }
     }
-    const current = canonical === undefined
-      ? undefined
-      : workspaces.find((workspace) => samePath(workspace.path, canonical));
+    // 「当前工作区」只认注册表归属；cwd 相同但没归属的孤儿，必须留在目标列表里（补归属入口）。
+    const member = entities.find((entity) => Array.isArray(entity.sessionIds) && entity.sessionIds.indexOf(sessionId) >= 0);
+    const cwdMatch = canonical === undefined ? undefined : entities.find((entity) => samePath(entity.path, canonical));
+    const memberId = member === undefined ? null : member.id;
+    const cwdMatchId = cwdMatch === undefined ? null : cwdMatch.id;
+    const currentId = memberId;
     const activity = await host.listActivity(sessionId);
     const live = host.isSessionLive(sessionId);
     // 就地接管可用时，连「正在跑活」都能搬（换掉 live 写句柄的 header，turn 不断）。
@@ -634,7 +638,10 @@ export function apply(ctx, config) {
       id: sessionId,
       cwd: cwd ?? null,
       canonicalCwd: canonical ?? null,
-      currentWorkspaceId: current === undefined ? null : current.id,
+      currentWorkspaceId: currentId,
+      memberOfWorkspaceId: memberId,
+      cwdMatchesWorkspaceId: cwdMatchId,
+      currentWorkspaceBy: member !== undefined ? 'membership' : null,
       live,
       willHandoff: handoffAvailable && reason === null,
       willRelease: live && !handoffAvailable && reason === null,
@@ -645,7 +652,9 @@ export function apply(ctx, config) {
     };
     payload.workspaces = workspaces.map((workspace) => ({
       ...workspace,
-      current: workspace.id === payload.session.currentWorkspaceId,
+      current: workspace.id === currentId,
+      member: workspace.id === memberId,
+      cwdMatches: workspace.id === cwdMatchId,
     }));
     return payload;
   }

@@ -89,6 +89,13 @@ C:\                 -> --C---           （只剥前导，所以尾部留下分�
   因此本插件在 attach 前调用私有的 `replaceHeaderIndex(listStoredHeaders())`（feature-detect，
   拿不到就降级为「下次启动补齐归属」）。
 
+**already-there 的判定**：目录相同（`cwd == target.path`）**不等于**已在目标工作区 —— DSH 的分组
+依据是 `workspace.json` 的 `sessionIds`。目录在、归属不在（孤儿/未分组）时，`relocateSession` 走
+`attachExisting`：优先 `host.adoptSession`，老宿主退回 `adoptSessions + detachSessions`，补写归属后
+返回 `applied: "attached"`，不动文件、不写迁移日志。`/describe` 的 `currentWorkspaceId` 也**只认归属**，
+并额外返回 `memberOfWorkspaceId` / `cwdMatchesWorkspaceId`，避免 UI 把孤儿会话当成「已在目标工作区」
+而不给补归属的入口。
+
 ## Zstandard 容器
 
 - 日志是**一串彼此独立的 Zstandard 帧**：第一帧**恰好只有 header 一行**，后续每批一帧。
