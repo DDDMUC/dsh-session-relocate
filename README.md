@@ -89,7 +89,9 @@ curl http://127.0.0.1:3080/api/dsh-session-relocate/status
 
 ### 会话页常驻的工作区 chip
 
-会话页 composer 卡片顶部那一行会常驻一个工作区 chip（文件夹 + 工作区名），**排在「创造模式」预设 chip 的左边**（和 hero 页的顺序一致）。点它 → 选目标工作区 → 直接把这个会话搬过去（和侧栏菜单同一条 `/move` 路径；`applied: "attached"` 会显示「已补上归属」）。新会话 hero 页不显示（官方那条已经在），官方 DOM 改版找不到 composer 卡片/选中会话时自动隐藏，不会坏页面。
+已开聊的会话，composer 上方会常驻一个工作区 chip（文件夹 + 工作区名，样式照官方 hero 那条做）。点它 → 选目标工作区 → 直接把这个会话搬过去（和侧栏菜单同一条 `/move` 路径；`applied: "attached"` 会显示「已补上归属」）。
+
+**新会话（hero）页不渲染** —— 官方那条工作区胶囊还在，避免同一条 chip 出现两次；判定是 `session.blank`，再用 `[class*="heroWorkspaceRow"]` 兜底。它注册在官方槽 `conversation.input.dock`（和预设胶囊同一个槽），节点由 React 维护，不会被重渲染顶掉。
 
 ### 正在回答的对话也能搬
 

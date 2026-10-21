@@ -213,13 +213,12 @@ header 是冻的，所以**那一轮的工具仍然用旧目录**；下次打开
 「将移动 M / 跳过 K」；M=0 的项置灰、不绑点击 —— 省掉纯 no-op 的 N 次请求，又不会在多选跨工作区时
 误删合法目标（例如 A 里 2 条、B 里 1 条，选 A 是合法的：搬 B 的 1 条、跳过 A 的 2 条）。
 
-**composer 常驻 chip**：官方只在 hero 里渲染 workspace chip；插件把 chip 插进 composer 卡片顶部
-accessory 行（`[class*="accessory"]`，官方「创造模式」预设 chip 就在这行）的**第一个子节点**，
-顺序与 hero 一致：`[工作区] [预设]`。座位本身是 flex 列，高度被 ResizeObserver 记进
-`--dsh-composer-height`，所以不会压住消息；找不到 accessory 就退回 `[data-composer-seat]` 顶部。
-会话从侧栏 `[data-row-key^="session:"][aria-selected="true"]` 认，工作区名从对应
-`[data-row-key="workspace:<id>"]` 的文本读；hero 页检测 `[class*="heroWorkspaceRow"]` 后隐藏，避免两条。
-点 chip → `/describe` → 选目标 → `/move`。全部是 DOM 约定，找不到就隐藏（降级不报错）。
+**composer 常驻 chip**：注册进官方槽 `conversation.input.dock`（list / scope=session；挂载点是
+`composerStack`，一个 **column** flex，所以**每个注册项占一行**）。和 `dsh-preset-workbench` 的预设胶囊
+同一个槽：它的行在前（order -20），我们的在后。横向定位完全靠自绘容器（宽度抄
+`.wSkVaW_composerHero`、左内边距 20px 抄 `.wSkVaW_heroWorkspaceRow`），槽本身不负责定位。
+官方 hero 那一排（`heroWorkspaceRow`）在时**完全不渲染**（`session.blank` + DOM 兜底），
+避免同一条 chip 出现两次。点 chip → `/describe` → 选目标 → `/move`。
 
 **连同子对话**：主机在搬完一条会话后，用 `sessionPersistence.list()` 的 header 关系找
 `origin === 'subagent' && parentSession === 本会话` 的后代（递归到孙），逐条走完整的
