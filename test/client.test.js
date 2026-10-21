@@ -1049,3 +1049,11 @@ test('设置页：连同子对话开关默认开，点一下写入关闭', async
   delete globalThis.localStorage;
   delete globalThis.document;
 });
+
+test('composer chip：Node 环境（没有 window）下空操作，dispose 可重复调', async () => {
+  const harness = await mount({});
+  const dispose = harness.api.__chip.installComposerChip();
+  assert.equal(typeof dispose, 'function');
+  dispose();
+  dispose();
+});
