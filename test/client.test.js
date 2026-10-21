@@ -829,8 +829,8 @@ test('批量：apply 把契约合并进引导全局（不覆盖 prefix），并�
   assert.equal(contract.supportsBulkMove, true);
   assert.equal(typeof contract.moveSelection, 'function');
   assert.ok(dom.dispatched.some((event) => event.type === 'dsh-session-relocate:ready'), '应当派发 ready 事件');
-  assert.deepEqual(slots, ['plugins.row.config', 'plugins.bundle.config', 'sidebar.workspaces.session.menu.item'], '三处注入：行配置页 + 包配置页 + 会话菜单');
-  assert.equal(registered, 3, '三个 slot 各注入一次');
+  assert.deepEqual(slots, ['conversation.input.dock', 'plugins.row.config', 'plugins.bundle.config', 'sidebar.workspaces.session.menu.item'], '四处注入：composer chip + 行配置页 + 包配置页 + 会话菜单');
+  assert.equal(registered, 4, '四个 slot 各注入一次');
   delete globalThis.document;
 });
 
@@ -1050,10 +1050,3 @@ test('设置页：连同子对话开关默认开，点一下写入关闭', async
   delete globalThis.document;
 });
 
-test('composer chip：Node 环境（没有 window）下空操作，dispose 可重复调', async () => {
-  const harness = await mount({});
-  const dispose = harness.api.__chip.installComposerChip();
-  assert.equal(typeof dispose, 'function');
-  dispose();
-  dispose();
-});
