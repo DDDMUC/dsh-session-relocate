@@ -1041,7 +1041,15 @@ test('设置页：连同子对话开关默认开，点一下写入关闭', async
   toggle.props.onClick();
   assert.deepEqual(writes, [['dsh-session-relocate.includeChildren', 'false']], '点一下关掉并持久化');
   assert.equal(harness.api.__settings.wantChildren(), false);
-  const star = node.children[1];
+  const modeSetting = node.children[1];
+  assert.equal(modeSetting.props.className, 'dshsm-setting', '第二块是「chip 什么时候出现」');
+  const seg = modeSetting.children[1];
+  assert.equal(seg.props.className, 'dshsm-seg');
+  assert.deepEqual(seg.children.map((button) => button.props['data-on']), ['true', 'false', 'false'], '默认「一直出现」');
+  seg.children[1].props.onClick();
+  assert.equal(harness.api.__settings.chipMode(), 'hover', '点「悬浮才出现」后立即生效');
+  assert.ok(writes.some((pair) => pair[0] === 'dsh-session-relocate.chipMode' && pair[1] === 'hover'), '写入 localStorage');
+  const star = node.children[2];
   assert.equal(star.type, 'a', '和 free-search 一样是整条链接');
   assert.equal(star.props.href, 'https://github.com/DDDMUC/dsh-session-relocate');
   assert.equal(star.props.target, '_blank');

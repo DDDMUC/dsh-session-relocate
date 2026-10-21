@@ -217,6 +217,11 @@ header 是冻的，所以**那一轮的工具仍然用旧目录**；下次打开
 `composerStack`，一个 **column** flex，所以**每个注册项占一行**）。和 `dsh-preset-workbench` 的预设胶囊
 同一个槽：它的行在前（order -20），我们的在后。横向定位完全靠自绘容器（宽度抄
 `.wSkVaW_composerHero`、左内边距 20px 抄 `.wSkVaW_heroWorkspaceRow`），槽本身不负责定位。
+出现方式由设置页三选一，存在 `localStorage['dsh-session-relocate.chipMode']`（always / hover / never）：
+hover 用 `.dshsm-chip[data-mode="hover"]` 的 opacity + `.dshsm-dock:hover` 实现（容器仍占位，不跳）；
+never 时容器加 `.dshsm-dock--hidden`（`justify-content:flex-end`），子槽里的预设胶囊回到右边。
+自己还开了一个子槽 `session-relocate.dock`（list / scope=session），别人注册进来就排在 chip 右边；
+子槽必须用 renderer 给的 `SessionProvider` 包一层才能拿到会话。
 官方 hero 那一排（`heroWorkspaceRow`）在时**完全不渲染**（`session.blank` + DOM 兜底），
 避免同一条 chip 出现两次。点 chip → `/describe` → 选目标 → `/move`。
 
