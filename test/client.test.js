@@ -1058,3 +1058,16 @@ test('设置页：连同子对话开关默认开，点一下写入关闭', async
   delete globalThis.document;
 });
 
+
+test('样式：皮肤插件把 input.dock 子元素刷成配件时，我们的容器有高特异性复位', async () => {
+  const harness = await mount({});
+  const css = harness.api.__ui.css();
+  assert.match(
+    css,
+    /html:root:root:root \[data-phase="active"\] \[data-slot="conversation\.input\.dock"\] > \.dshsm-dock\.dshsm-dock/,
+    '复位选择器必须同时命中 active 相位并压过皮肤的通配规则',
+  );
+  assert.match(css, /backdrop-filter:none !important/, '玻璃效果要清掉');
+  assert.match(css, /border-radius:0 !important/, '圆角要清掉');
+  assert.match(css, /padding:0 16px 0 20px !important/, '自己的内边距要保留');
+});
