@@ -372,11 +372,13 @@ function makeFakeDocument() {
     appendChild(node) { body.children.push(node); node.parentNode = body; },
     contains: () => true,
   };
+  const head = { children: [], appendChild(node) { head.children.push(node); node.parentNode = head; } };
   const doc = {
     body,
+    head,
     addEventListener(type, handler) { listeners.set(type, handler); },
     removeEventListener(type) { listeners.delete(type); },
-    createElement() { return { style: {}, textContent: '', parentNode: null, setAttribute() {} }; },
+    createElement() { return { style: {}, dataset: {}, textContent: '', parentNode: null, setAttribute() {}, appendChild() {} }; },
     querySelector() { return null; },
     querySelectorAll(selector) { return selector === '.dsdel-check-on' ? hostMarks : []; },
     dispatchEvent(event) { dispatched.push(event); return true; },
@@ -829,8 +831,8 @@ test('批量：apply 把契约合并进引导全局（不覆盖 prefix），并�
   assert.equal(contract.supportsBulkMove, true);
   assert.equal(typeof contract.moveSelection, 'function');
   assert.ok(dom.dispatched.some((event) => event.type === 'dsh-session-relocate:ready'), '应当派发 ready 事件');
-  assert.deepEqual(slots, ['conversation.input.dock', 'plugins.row.config', 'plugins.bundle.config', 'sidebar.workspaces.session.menu.item'], '四处注入：composer chip + 行配置页 + 包配置页 + 会话菜单');
-  assert.equal(registered, 4, '四个 slot 各注入一次');
+  assert.deepEqual(slots, ['conversation.input.dock', 'sidebar.footer.action', 'plugins.row.config', 'plugins.bundle.config', 'sidebar.workspaces.session.menu.item'], '五处注入：composer chip + 页脚底栏 + 行配置页 + 包配置页 + 会话菜单');
+  assert.equal(registered, 5, '五个 slot 各注入一次');
   delete globalThis.document;
 });
 
@@ -1070,4 +1072,48 @@ test('样式：皮肤插件把 input.dock 子元素刷成配件时，我们的�
   assert.match(css, /backdrop-filter:none !important/, '玻璃效果要清掉');
   assert.match(css, /border-radius:0 !important/, '圆角要清掉');
   assert.match(css, /padding:0 16px 0 20px !important/, '自己的内边距要保留');
+});
+
+test('样式：多选底栏只用正面选择器让位，按钮不被压扁', async () => {
+  const harness = await mount({});
+  const css = harness.api.__ui.css();
+  // 只禁止「除了我的类名之外全隐藏」那种写法；footArea 那条点名保留 footerActions 的 :not 是文档原文。
+  assert.doesNotMatch(css, /:not\([^)]*dshsm/, '不要写排除式选择器（槽位容器是 display:contents，会连自己一起藏掉）');
+  assert.match(css, /body\.dshsm-selecting \[data-slot="sidebar\.footer\.action"\] > \[data-dsh-plugin\]\{display:none\}/);
+  assert.match(css, /body\.dshsm-selecting \[data-slot="sidebar\.footer\.action"\] > \[class\*="_entryRow"\]\{display:none\}/);
+  assert.match(css, /body\.dshsm-selecting \[class\*="_footArea"\] > \*:not\(\[class\*="_footerActions"\]\)\{display:none\}/);
+  assert.match(css, /\.dshsm-bar-btn\{[^}]*flex:0 0 auto[^}]*white-space:nowrap/, '按钮不许被压扁/换行');
+  assert.match(css, /\.dshsm-bar-count\{[^}]*flex:1/, '计数让路');
+});
+
+test('多选底栏：常驻槽组件，没进多选返回 null；进了渲染计数 + 取消 + 移动', async () => {
+  const { doc } = makeFakeDocument();
+  const added = [];
+  doc.body.classList = { add: (c) => added.push(['add', c]), remove: (c) => added.push(['remove', c]) };
+  globalThis.document = doc;
+  try {
+    const idle = await mount({});
+    assert.equal(idle.api.__bulk.BulkBar({}), null, '槽位组件常驻，靠 null 表示不存在');
+
+    const harness = await mount({});
+    assert.equal(harness.api.__bulk.slotReady(), true, 'apply 里应当已注册页脚槽');
+    harness.api.__bulk.enterBulk();
+    assert.deepEqual(added, [['add', 'dshsm-selecting']], '进多选给 body 打标记');
+    const bar = harness.api.__bulk.BulkBar({});
+    assert.equal(bar.props.className, 'dshsm-bar');
+    assert.equal(bar.props.role, 'toolbar');
+    assert.equal(textOf(bar.children[0]), '已选 0 个');
+    const buttons = collectButtons(bar);
+    assert.deepEqual(buttons.map((b) => textOf(b)), ['取消', '移动']);
+    assert.equal(buttons[1].props.disabled, true, '一个都没选时「移动」禁用');
+
+    harness.api.__bulk.state.selected[SESSION_ID] = true;
+    harness.api.__bulk.bulkUpdateBar();
+    assert.deepEqual(harness.api.__bulk.bulkSnapshot(), { selecting: true, count: 1, text: '已选 1 个', busy: false });
+
+    harness.api.__bulk.exitBulk();
+    assert.deepEqual(added[added.length - 1], ['remove', 'dshsm-selecting'], '退出时摘掉标记');
+  } finally {
+    delete globalThis.document;
+  }
 });

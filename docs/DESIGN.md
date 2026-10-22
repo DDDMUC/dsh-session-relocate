@@ -204,6 +204,13 @@ header 是冻的，所以**那一轮的工具仍然用旧目录**；下次打开
 读不到才回落到 `/describe` —— 这样「立刻把指针挪到自己分组里」也不会误接管。
 投放时 `stopPropagation()` 吃掉事件，避免官方在同一事件上再处理一次。
 
+**多选底栏**：注册进宿主槽 `sidebar.footer.action`（list / scope root，宿主渲染在
+`footArea > footerActions`），不再自绘 `position:fixed` 卡片 —— 位置、宽度、和页脚其它按钮的关系都
+交给宿主排版。选择期间给 `<body>` 加 `dshsm-selecting`，用三条**正面选择器**让用量胶囊 / 账户行 /
+别家页脚按钮让位（绝不写「> \*:not(.我的类)」：槽位容器是 `display: contents`，那种写法会连自己一起藏掉）。
+槽位组件常驻，靠返回 `null` 表示「不存在」。老宿主没有这个槽时回退自绘浮动卡片（`.dshsm-bar-float`）。
+文案一律自己插值，不把参数交给宿主 `t`。
+
 **多选拖动**：dragstart 时读当前选中集合 —— 本插件的多选读 `bulkState`；`dsh-delete-session`
 的多选读它给选中行挂的 `.dsdel-check-on`（只读它的 DOM，不动它的状态）。拖的会话在选中集合里且
 不止一条时，投放走 `runBulkMove`（逐条 defer + 一次 commit），完成后发一个 `Escape` 让宿主收起
