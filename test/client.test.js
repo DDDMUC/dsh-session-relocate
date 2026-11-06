@@ -76,6 +76,118 @@ function makeFetch(routes) {
   return { impl, calls };
 }
 
+/**
+ * 挂一个「带官方 primitives」的 bundle，并把每个槽的注册组件记下来。
+ * primitives 传 null 表示宿主没提供（走自绘回退）。
+ */
+async function mountDock(primitives, routes) {
+  const entry = await loadBundle();
+  const react = makeReact();
+  const api = entry.factory((name) => {
+    if (name === 'react') return react;
+    if (primitives !== null && name === '@deepseek-ai/dsh-client-ui-primitives') return primitives;
+    throw new Error('unexpected require: ' + name);
+  });
+  const registrations = new Map();
+  const fakeCtx = {
+    slots: {
+      inject(slot, factory) {
+        const disposer = factory();
+        return typeof disposer === 'function' ? disposer : () => {};
+      },
+      register(spec, component) {
+        registrations.set(spec.name, { spec, component });
+        return () => {};
+      },
+    },
+  };
+  api.apply(fakeCtx);
+  const fetchHarness = makeFetch(routes);
+  globalThis.fetch = fetchHarness.impl;
+  globalThis.__DSH_SESSION_RELOCATE__ = { prefix: PREFIX };
+  Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true });
+  const registration = registrations.get('conversation.input.dock');
+  assert.ok(registration !== undefined, '应当注册 conversation.input.dock');
+  const props = { sessionId: SESSION_ID };
+  const render = () => {
+    react.reset();
+    return registration.component(props);
+  };
+  return { api, registrations, registration, react, render, calls: fetchHarness.calls };
+}
+
+const FAKE_PRIMITIVES = {
+  Menu(props) { return { type: 'Menu', props, children: [] }; },
+  IconFolderCloseRegular(props) { return { type: 'FolderIcon', props, children: [] }; },
+  IconPlusOutlineRegular(props) { return { type: 'PlusIcon', props, children: [] }; },
+};
+
+test('chip：有官方 Menu 时点开就是官方那套工作区下拉（当前项画勾 + 添加工作区…）', async () => {
+  const harness = await mountDock(FAKE_PRIMITIVES, {
+    '/describe': () => ({
+      ok: true,
+      session: { id: SESSION_ID, currentWorkspaceId: 'ws-a' },
+      workspaces: [
+        { id: 'ws-a', title: 'DSH web', path: 'E:\\E\\DSH web' },
+        { id: 'ws-b', title: 'DSH', path: 'E:\\E\\DSH' },
+      ],
+    }),
+  });
+
+  const first = harness.render();
+  const chip = first.children[0];
+  assert.equal(chip.type, 'button');
+  assert.equal(chip.props['aria-haspopup'], 'menu', '有 Menu 时应当是下拉而不是弹窗');
+  assert.equal(chip.props['aria-expanded'], 'false');
+
+  chip.props.onClick();
+  await flush();
+  const second = harness.render();
+  const menu = second.children.find((node) => node !== null && node !== undefined && node.type === FAKE_PRIMITIVES.Menu);
+  assert.ok(menu !== undefined, '打开后应当渲染官方 Menu');
+  assert.equal(menu.props.open, true);
+  assert.equal(menu.props.selectedId, 'ws-a', '当前工作区由 selectedId 画勾');
+  assert.deepEqual(menu.props.items.map((item) => item.label), ['DSH web', 'DSH']);
+  assert.equal(menu.props.items[0].icon.type, FAKE_PRIMITIVES.IconFolderCloseRegular, '每行前面是官方文件夹图标');
+  assert.deepEqual(menu.props.footer.map((item) => item.label), ['添加工作区…']);
+  assert.equal(menu.props.footer[0].icon.type, FAKE_PRIMITIVES.IconPlusOutlineRegular);
+  assert.equal(menu.props.portal, true);
+  assert.equal(menu.props.align, 'start');
+  assert.equal(typeof menu.props.getAnchorRect, 'function');
+  assert.equal(menu.props.getAnchorRect(), null, '还没挂到 DOM 上时锚点为空也不该抛');
+
+  // 选另一个工作区 → 发一次 /move
+  menu.props.onSelect('ws-b');
+  await flush();
+  const moveCalls = harness.calls.filter((call) => /\/move$/.test(call.url));
+  assert.equal(moveCalls.length, 1, '选另一个工作区应当发一次 /move');
+  assert.equal(moveCalls[0].body.sessionId, SESSION_ID);
+  assert.equal(moveCalls[0].body.targetWorkspaceId, 'ws-b');
+});
+
+test('chip：选了当前工作区不发请求；没有官方 Menu 时不声称自己是下拉', async () => {
+  const harness = await mountDock(FAKE_PRIMITIVES, {
+    '/describe': () => ({
+      ok: true,
+      session: { id: SESSION_ID, currentWorkspaceId: 'ws-a' },
+      workspaces: [{ id: 'ws-a', title: 'DSH web', path: 'E:\\E\\DSH web' }],
+    }),
+  });
+  const chip = harness.render().children[0];
+  chip.props.onClick();
+  await flush();
+  const menu = harness.render().children.find((node) => node !== null && node !== undefined && node.type === FAKE_PRIMITIVES.Menu);
+  assert.equal(menu.props.items.length, 1);
+  assert.deepEqual(menu.props.footer.map((item) => item.label), ['添加工作区…'], '只有一个工作区时也能添加');
+  menu.props.onSelect('ws-a');
+  await flush();
+  assert.equal(harness.calls.filter((call) => /\/move$/.test(call.url)).length, 0, '选当前工作区不该发 /move');
+
+  const fallback = await mountDock(null, { '/describe': () => ({ ok: true, session: {}, workspaces: [] }) });
+  const fallbackChip = fallback.render().children[0];
+  assert.equal(fallbackChip.props['aria-haspopup'], undefined, '没有 Menu 时退回自绘面板，不设 aria-haspopup');
+});
+
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /** 把一个 bundle 挂起来，返回渲染器与调用记录。 */

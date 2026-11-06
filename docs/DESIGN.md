@@ -230,7 +230,14 @@ never 时容器加 `.dshsm-dock--hidden`（`justify-content:flex-end`），子�
 自己还开了一个子槽 `session-relocate.dock`（list / scope=session），别人注册进来就排在 chip 右边；
 子槽必须用 renderer 给的 `SessionProvider` 包一层才能拿到会话。
 官方 hero 那一排（`heroWorkspaceRow`）在时**完全不渲染**（`session.blank` + DOM 兜底），
-避免同一条 chip 出现两次。点 chip → `/describe` → 选目标 → `/move`。
+避免同一条 chip 出现两次。
+
+点 chip 弹的是**官方 `Menu`**（`dsh.client.inject` 里声明了 `@deepseek-ai/dsh-client-ui-primitives`）：
+`items` = 各工作区（`IconFolderCloseRegular` 图标），`selectedId` = 当前工作区（官方自己画勾），
+`footer` = `[{ label: '添加工作区…', icon: IconPlusOutlineRegular }]`，`portal: true` + `getAnchorRect`
+指向 chip 本身 —— 位置、圆角、阴影、键盘导航都和 hero 那条工作区胶囊一致，不再自绘弹窗。
+同名工作区用末尾路径段区分（`withPathSuffix`）。取不到 primitives（老宿主）时退回原来的自绘面板。
+选中目标后 `/move`；选「添加工作区…」走 `prompt` → `/move { targetPath }`。
 
 **连同子对话**：主机在搬完一条会话后，用 `sessionPersistence.list()` 的 header 关系找
 `origin === 'subagent' && parentSession === 本会话` 的后代（递归到孙），逐条走完整的
