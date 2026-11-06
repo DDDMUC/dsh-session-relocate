@@ -237,7 +237,10 @@ never 时容器加 `.dshsm-dock--hidden`（`justify-content:flex-end`），子�
 `footer` = `[{ label: '添加工作区…', icon: IconPlusOutlineRegular }]`，`portal: true` + `getAnchorRect`
 指向 chip 本身 —— 位置、圆角、阴影、键盘导航都和 hero 那条工作区胶囊一致，不再自绘弹窗。
 同名工作区用末尾路径段区分（`withPathSuffix`）。取不到 primitives（老宿主）时退回原来的自绘面板。
-选中目标后 `/move`；选「添加工作区…」走 `prompt` → `/move { targetPath }`。
+选中目标后 `/move`。选「添加工作区…」调**官方目录选择器**再 `/move { targetPath }`：
+优先 `globalThis.__DSH_DIRECTORY_PICKER__.pick()`（桌面端 preload），否则 `ctx.get('uiWorkspace').pickDirectory()` ——
+`uiWorkspace` 是**服务**不是模块，`ctx.get` 是可选查找（动态插件 ctx 允许未声明的服务查询），
+所以这条不需要改 `dsh.client.inject`、也不需要重启。两者都没有才退回 `prompt` 手输。
 
 **连同子对话**：主机在搬完一条会话后，用 `sessionPersistence.list()` 的 header 关系找
 `origin === 'subagent' && parentSession === 本会话` 的后代（递归到孙），逐条走完整的

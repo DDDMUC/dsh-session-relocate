@@ -80,7 +80,7 @@ function makeFetch(routes) {
  * 挂一个「带官方 primitives」的 bundle，并把每个槽的注册组件记下来。
  * primitives 传 null 表示宿主没提供（走自绘回退）。
  */
-async function mountDock(primitives, routes) {
+async function mountDock(primitives, routes, services) {
   const entry = await loadBundle();
   const react = makeReact();
   const api = entry.factory((name) => {
@@ -90,6 +90,10 @@ async function mountDock(primitives, routes) {
   });
   const registrations = new Map();
   const fakeCtx = {
+    get(name) {
+      if (services !== null && services !== undefined && Object.prototype.hasOwnProperty.call(services, name)) return services[name];
+      return undefined;
+    },
     slots: {
       inject(slot, factory) {
         const disposer = factory();
@@ -1227,5 +1231,81 @@ test('多选底栏：常驻槽组件，没进多选返回 null；进了渲染计
     assert.deepEqual(added[added.length - 1], ['remove', 'dshsm-selecting'], '退出时摘掉标记');
   } finally {
     delete globalThis.document;
+  }
+});
+
+test('chip：「添加工作区…」走官方目录选择器（uiWorkspace.pickDirectory），不弹手输框', async () => {
+  const savedPrompt = globalThis.prompt;
+  let prompts = 0;
+  globalThis.prompt = () => { prompts += 1; return ''; };
+  try {
+    const harness = await mountDock(FAKE_PRIMITIVES, {
+      '/describe': () => ({
+        ok: true,
+        session: { id: SESSION_ID, currentWorkspaceId: 'ws-a' },
+        workspaces: [{ id: 'ws-a', title: 'DSH web', path: 'E:\\E\\DSH web' }],
+      }),
+      '/move': () => ({ ok: true, applied: 'live', targetTitle: '新建', targetWorkspaceId: 'ws-new' }),
+    }, { uiWorkspace: { pickDirectory: async () => 'E:\\E\\新建' } });
+
+    const chip = harness.render().children[0];
+    chip.props.onClick();
+    await flush();
+    const menu = harness.render().children.find((node) => node !== null && node !== undefined && node.type === FAKE_PRIMITIVES.Menu);
+    menu.props.onSelect('__dshsm-add-workspace');
+    await flush();
+    await flush();
+
+    assert.equal(prompts, 0, '有官方选择器时不该再弹手输框');
+    const moveCalls = harness.calls.filter((call) => /\/move$/.test(call.url));
+    assert.equal(moveCalls.length, 1);
+    assert.equal(moveCalls[0].body.targetPath, 'E:\\E\\新建', '选中目录直接作为 targetPath 发出去');
+    assert.equal(moveCalls[0].body.sessionId, SESSION_ID);
+  } finally {
+    if (savedPrompt === undefined) delete globalThis.prompt;
+    else globalThis.prompt = savedPrompt;
+  }
+});
+
+test('chip：没有目录选择器时，「添加工作区…」退回手输路径；取消则不发请求', async () => {
+  const savedPrompt = globalThis.prompt;
+  try {
+    const routed = {
+      '/describe': () => ({
+        ok: true,
+        session: { id: SESSION_ID, currentWorkspaceId: 'ws-a' },
+        workspaces: [{ id: 'ws-a', title: 'DSH web', path: 'E:\\E\\DSH web' }],
+      }),
+      '/move': () => ({ ok: true, applied: 'live', targetTitle: '手输', targetWorkspaceId: 'ws-x' }),
+    };
+
+    // ① 用户手输一个路径
+    globalThis.prompt = () => '  E:\\E\\手输  ';
+    const typed = await mountDock(FAKE_PRIMITIVES, routed, null);
+    const chip = typed.render().children[0];
+    chip.props.onClick();
+    await flush();
+    const menu = typed.render().children.find((node) => node !== null && node !== undefined && node.type === FAKE_PRIMITIVES.Menu);
+    menu.props.onSelect('__dshsm-add-workspace');
+    await flush();
+    await flush();
+    const typedMoves = typed.calls.filter((call) => /\/move$/.test(call.url));
+    assert.equal(typedMoves.length, 1);
+    assert.equal(typedMoves[0].body.targetPath, 'E:\\E\\手输', '首尾空白要去掉');
+
+    // ② 用户取消手输
+    globalThis.prompt = () => null;
+    const cancelled = await mountDock(FAKE_PRIMITIVES, routed, null);
+    const chip2 = cancelled.render().children[0];
+    chip2.props.onClick();
+    await flush();
+    const menu2 = cancelled.render().children.find((node) => node !== null && node !== undefined && node.type === FAKE_PRIMITIVES.Menu);
+    menu2.props.onSelect('__dshsm-add-workspace');
+    await flush();
+    await flush();
+    assert.equal(cancelled.calls.filter((call) => /\/move$/.test(call.url)).length, 0, '取消后不该发请求');
+  } finally {
+    if (savedPrompt === undefined) delete globalThis.prompt;
+    else globalThis.prompt = savedPrompt;
   }
 });
