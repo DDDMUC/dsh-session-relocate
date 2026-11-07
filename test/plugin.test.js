@@ -489,14 +489,18 @@ test('子对话：descendantIdsOf 沿 parentSession 递归、按层序、不串�
   const snapshots = [
     { header: { id: 'p' } },
     { header: { id: 'c1', parentSession: 'p', origin: 'subagent' } },
-    { header: { id: 'c2', parentSession: 'p', origin: 'subagent' } },
+    // 子对话的第二种模式：fork 自己（带 seed 历史），isSeeded 只是「有没有继承父日志前缀」，
+    // 它仍然是 origin=subagent 的子会话，一样要跟着搬。
+    { header: { id: 'c2', parentSession: 'p', origin: 'subagent', isSeeded: true } },
     { header: { id: 'g1', parentSession: 'c1', origin: 'subagent' } },
-    { header: { id: 'fork', parentSession: 'p' } },
+    // 用户在侧栏「分叉会话」造出来的真正 fork：即使它带了 parentSession（历史上出现过这种），
+    // 因为 origin 不是 subagent，也绝不能被当成子会话搬走。
+    { header: { id: 'fork', parentSession: 'p', isSeeded: true } },
     { header: { id: 'x', parentSession: 'other', origin: 'subagent' } },
     { header: { id: 'orphan' } },
     null,
   ];
-  assert.deepEqual(descendantIdsOf(snapshots, 'p'), ['c1', 'c2', 'g1']);
+  assert.deepEqual(descendantIdsOf(snapshots, 'p'), ['c1', 'c2', 'g1'], '两种子对话都搬；真 fork 不搬');
   assert.deepEqual(descendantIdsOf(snapshots, 'c1'), ['g1']);
   assert.deepEqual(descendantIdsOf(snapshots, 'nobody'), []);
   assert.deepEqual(descendantIdsOf(undefined, 'p'), []);
