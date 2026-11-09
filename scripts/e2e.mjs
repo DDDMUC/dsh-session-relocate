@@ -65,6 +65,35 @@ function seed() {
   process.stdout.write('seeded ' + SESSION_ID + ' -> ' + dir + '\n');
 }
 
+/**
+ * 查一次 DSH 自己的 `session/list`（issue #1 的回归点）。
+ *
+ * dsh-session-query 会把**内存里 live Session 的 header** 和**磁盘 artifact 的 header**
+ * 逐字段比对；任何一处分叉都会让这个接口整体报 `SESSION_QUERY_SOURCE_CONFLICT`，
+ * 于是刷新后侧栏全空（重启才恢复）。这个 profile 没挂该接口时只提示、不判定失败。
+ */
+async function assertSessionListHealthy(stage) {
+  const response = await fetch('http://127.0.0.1:' + PORT + '/api/session/list', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: 'e2e-' + String(Date.now()),
+      method: 'session/list',
+      payload: { args: { _request: {} } },
+    }),
+  });
+  if (response.status === 404) {
+    process.stdout.write('list  : 跳过（这个 profile 没挂 /api/session/list）\n');
+    return;
+  }
+  const payload = await response.json().catch(() => null);
+  if (payload === null || payload.ok === false) {
+    throw new Error('session/list 在「' + stage + '」之后不可用（header 分叉）：' + JSON.stringify(payload === null ? response.status : payload.error));
+  }
+  process.stdout.write('list  : 正常（' + stage + '之后）\n');
+}
+
 async function post(path, body) {
   const response = await fetch(BASE + path, {
     method: 'POST',
@@ -182,6 +211,9 @@ async function live() {
   if (after.session?.live !== true) throw new Error('就地接管之后会话必须还活着');
   if (after.session?.unreadable === true) throw new Error('DSH 读不懂改写后的日志：' + String(after.session.message));
 
+  // issue #1 的回归点：迁移后 dsh 自己的会话列表必须还能用（header 内存/磁盘不许分叉）。
+  await assertSessionListHealthy('就地接管');
+
   const srcDir = join(HOME, 'sessions', projectKey(srcWs), encodeSegment(sessionId));
   const dstDir = join(HOME, 'sessions', projectKey(dstWs), encodeSegment(sessionId));
   if (existsSync(srcDir)) throw new Error('源目录还在：' + srcDir);
@@ -197,7 +229,7 @@ async function live() {
   process.stdout.write('drop  : ' + JSON.stringify(dropped) + '\n');
   if (dropped.ok !== true) throw new Error('清理失败');
   if (existsSync(dstDir)) throw new Error('清理后目标目录还在');
-  process.stdout.write('OK：就地接管（写链内搬 → 换 header → 释放锁 → 会话仍活 → 旧目录不复活 → 清理）全部正确\n');
+  process.stdout.write('OK：就地接管（写链内搬 → 换写句柄 + live Session 两处 header → 释放锁 → 会话仍活 → session/list 仍可用 → 旧目录不复活 → 清理）全部正确\n');
 }
 
 

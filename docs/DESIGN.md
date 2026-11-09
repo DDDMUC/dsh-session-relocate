@@ -132,6 +132,13 @@ C:\                 -> --C---           （只剥前导，所以尾部留下分�
 
 ## B. 就地接管：正在跑的会话怎么搬
 
+> **两处 header 必须一起换**（issue #1）：写句柄的 `handle.header` 决定后续写入落到哪；
+> 内存里 `Session.header` 则是 `dsh-session-query` 的 `assertSessionHeadersCompatible()` 拿来
+> 与磁盘 artifact header 逐字段比对的那一份（`id / createdAt / cwd / parentSession / isSeeded /
+> delegationDepth`）。只换前者会让 `session/list` 抛 `SESSION_QUERY_SOURCE_CONFLICT`，
+> 而 `dsh-api-session-controller` 的 `list()` 没有逐条兜错 → 整个列表失败、侧栏全空，重启才恢复。
+> `Session.header` 是普通字段（不是 getter，实例没被冻），换引用即可；换不了就整体放弃（`handoff-failed`）。
+
 **为什么 attachSession 不行**：它读 header 时优先取内存里的活会话，而活会话的 header 被
 `validateSessionHeader` 末尾的 `return deepFreeze(record)` 冻住了 —— cwd 改不了，
 校验必然失败。所以接管这条路要绕开它，直接走注册表自己的写路径。

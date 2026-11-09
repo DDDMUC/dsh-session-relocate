@@ -162,7 +162,12 @@ function makeCtx(fixture, config) {
   /** 把一个会话造成「已打开」：live + entered 记录（+ 可选 live 写句柄）。 */
   function makeLive(id, options) {
     const withWriter = options === undefined || options.withWriter !== false;
-    live.set(id, { id });
+    // 真实 Session.header 是**普通字段**，但字段值是 deep-frozen 的；这里同样冻住，
+    // 用来证明插件是靠「整体换对象」而不是「改字段」来同步的。
+    const header = options !== undefined && options.header !== undefined
+      ? options.header
+      : Object.freeze({ version: 4, id, createdAt: 1790000000000, cwd: fixture.srcWs, isSeeded: false });
+    live.set(id, { id, header });
     liveEntries.set(id, {
       id,
       detach() {
@@ -340,6 +345,12 @@ test('move：正在跑的会话走「就地接管」——不释放、换 header
   // 写句柄已经被指向新路径，锁已释放（下次写入会在新路径重建）
   assert.equal(handle.header.cwd, fixture.dstWs, '写句柄的 header 必须换成目标 cwd');
   assert.equal(handle.lease, null, '内核写锁必须已释放');
+  // 内存里那条 live Session 的 header 也必须换 —— 否则 session-query 会认为磁盘与内存冲突，
+  // 整个 /api/session/list 报错（issues#1）。真实 header 是冻结对象，所以这里必须换引用。
+  const session = harness.live.get(SESSION_ID);
+  assert.equal(session.header.cwd, fixture.dstWs, 'live Session 的 header.cwd 必须同步成目标 cwd');
+  assert.equal(session.header.id, SESSION_ID, '其它字段原样保留');
+  assert.equal(Object.isFrozen(session.header), true, '换上去的 header 仍然要是冻结对象');
   // 归属走的是旁路（adoptSession），不是 attachSession
   assert.deepEqual(harness.calls, [
     ['drain', SESSION_ID],
@@ -504,4 +515,23 @@ test('子对话：descendantIdsOf 沿 parentSession 递归、按层序、不串�
   assert.deepEqual(descendantIdsOf(snapshots, 'c1'), ['g1']);
   assert.deepEqual(descendantIdsOf(snapshots, 'nobody'), []);
   assert.deepEqual(descendantIdsOf(undefined, 'p'), []);
+});
+
+test('move：live Session 拿不到 header 时放弃接管，文件一个字节都不动（issues#1 护栏）', async () => {
+  const fixture = makeFixture('plugin-move-live-noheader', 'plugin');
+  const harness = makeCtx(fixture, { sessionsRoot: fixture.sessionsRoot, journalsDir: fixture.journalsDir, home: fixture.base });
+  harness.makeLive(SESSION_ID, { header: null });
+  const handle = harness.handles.get(SESSION_ID);
+  // 先推进一次写链，让 flush/drain 的既有断言不受影响
+  const before = readFileSync(join(fixture.srcDir, 'session.v4.jsonl.zstd'));
+  const result = await call(routeFor(harness.routes, '/move'), 'POST', { sessionId: SESSION_ID, targetWorkspaceId: 'ws-dst' });
+
+  assert.equal(result.json.ok, false, '必须失败，而不是搬完留一个列表不可用的状态');
+  assert.equal(result.json.code, 'handoff-failed');
+  assert.equal(harness.live.has(SESSION_ID), true, '会话不受影响，还活着');
+  assert.equal(handle.header.cwd, fixture.srcWs, '写句柄 header 必须保持源 cwd');
+  assert.ok(existsSync(fixture.srcDir), '源目录必须还在');
+  assert.ok(!existsSync(fixture.dstDir), '目标目录不该出现');
+  assert.deepEqual(readFileSync(join(fixture.srcDir, 'session.v4.jsonl.zstd')), before, '日志内容一个字节都不该变');
+  rmSync(fixture.base, { recursive: true, force: true });
 });

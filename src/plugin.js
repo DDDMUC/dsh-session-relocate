@@ -258,6 +258,37 @@ export function apply(ctx, config) {
   });
 
   /** 组装一次迁移需要的 DSH 运行时能力。 */
+  /**
+   * 内存里那条 live Session（SessionStore.get(id) 返回的就是 Session 本身）。
+   * 拿不到（老版本 / 没有 sessions 服务）就返回 undefined。
+   */
+  function liveSessionOf(sessionId) {
+    const sessions = ctx.get('sessions');
+    if (sessions === undefined || sessions === null || typeof sessions.get !== 'function') return undefined;
+    const session = sessions.get(sessionId);
+    return session === null || session === undefined ? undefined : session;
+  }
+
+  /**
+   * 把 Session.header 整体换成「同内容、只改 cwd」的新对象。
+   *
+   * 为什么必须做：dsh-session-query 的 assertSessionHeadersCompatible() 会逐字段比对
+   * **live Session 的 header** 与 **磁盘 artifact 的 header**（id / createdAt / cwd /
+   * parentSession / isSeeded / delegationDepth），不一致即抛 SESSION_QUERY_SOURCE_CONFLICT；
+   * 而 /api/session/list 没有逐条兜错，一条冲突就让整个列表报错（issues#1：刷新后侧栏全空）。
+   *
+   * 可行性：Session.header 是普通字段（`header;`），不是 getter，实例也没被冻；
+   * 被 deepFreeze 的是 header 那个对象本身。header 全是标量字段，
+   * 所以「新建对象 + 浅冻结」与深冻结等价。
+   */
+  function retargetSessionHeader(session, cwd) {
+    const previous = session.header;
+    if (previous === null || typeof previous !== 'object') throw new Error('live session 没有可用的 header');
+    const next = { ...previous, cwd };
+    session.header = Object.freeze(next);
+    return previous;
+  }
+
   function buildHost() {
     const registry = ctx.workspaceRegistry;
     return {
@@ -357,6 +388,16 @@ export function apply(ctx, config) {
           // 的坏状态（下一次写入就把旧目录重建出来）。整体放弃，让调用方改走释放路径。
           return { ok: false, code: 'no-writer', detail: '找不到这个会话的 live 写句柄' };
         }
+        // 内存里那条 live Session 的 header 必须能一起换：只换写句柄的话，磁盘 header
+        // 与内存 header 就分叉了，session/list 会整体报错（issues#1）。改不了就整体放弃，
+        // 绝不搬完文件再留一个「列表不可用」的状态。
+        const liveSession = liveSessionOf(sessionId);
+        if (liveSession === undefined) {
+          return { ok: false, code: 'no-live-session', detail: '拿不到内存里的 live Session，放弃接管（避免 session/list header 冲突）' };
+        }
+        if (liveSession.header === null || typeof liveSession.header !== 'object') {
+          return { ok: false, code: 'no-session-header', detail: 'live Session 没有 header，放弃接管（避免 session/list header 冲突）' };
+        }
         if (typeof handle.drainLive === 'function') await handle.drainLive();
         if (typeof handle.flush === 'function') await handle.flush();
 
@@ -365,20 +406,31 @@ export function apply(ctx, config) {
         const transaction = await handle.enqueueChain(async () => {
           if (typeof handle.ensureLease === 'function') await handle.ensureLease();
           const originalHeader = handle.header;
+          let originalSessionHeader;
           try {
             if (handle.lease !== undefined && handle.lease !== null && typeof handle.lease.release === 'function') {
               await handle.lease.release();
             }
             handle.lease = null;
             handle.header = { ...originalHeader, cwd: targetCwd };
+            // 内存 header 跟着换（否则 session-query 会认为磁盘与内存冲突）。
+            originalSessionHeader = retargetSessionHeader(liveSession, targetCwd);
             const result = await runTransaction();
-            detail = '写链已接管：header.cwd -> ' + targetCwd;
+            detail = '写链已接管：header.cwd -> ' + targetCwd + '（写句柄 + live Session 同步）';
             result.writerRetargeted = true;
+            result.sessionHeaderRetargeted = true;
             return result;
           } catch (error) {
-            // 回滚：恢复 header 与锁状态，让后续写入继续落在原路径。
+            // 回滚：恢复写句柄 header、内存 header 与锁状态，让后续写入继续落在原路径。
             handle.header = originalHeader;
             handle.lease = null;
+            if (originalSessionHeader !== undefined) {
+              try {
+                liveSession.header = originalSessionHeader;
+              } catch (rollbackError) {
+                log('warn', '回滚内存 header 失败：' + String(rollbackError && rollbackError.message));
+              }
+            }
             throw error;
           }
         });

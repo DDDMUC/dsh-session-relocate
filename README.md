@@ -274,8 +274,13 @@ node --test
   菜单那条路始终不受影响，`dragMove: false` 可以一键全关。
 - **嵌套工作区**（工作区套工作区）时，父分组里若渲染了子分组，父分组的会话行不再算投放目标
   —— 这是保守取舍：宁可少接管，也不猜错工作区。
-- **正在跑活的那一轮不会换工作目录**：会话在内存里的 header 是 deep-frozen 的，改不了；
-  文件与归属都搬走了，但那一轮的工具仍然用旧目录，**下次打开**才真正在新目录里跑。
+- **正在跑活的那一轮不会换工作目录**：那一轮手里的工具工作目录是启动时定下的；
+  文件、归属、以及会话的 header 都已经搬到新目录，但**这一轮**的工具仍用旧目录，**下次打开**才真正在新目录里跑。
+  （修复后内存里那条 live 会话的 header 也会跟着换 —— 参见下一条。）
+- **原地接管会同时换两处 header**：写句柄的 `header`（决定后续写入落到哪）和内存里
+  `Session.header`（`session-query` 会拿它跟磁盘 header 逐字段比对）。只换前者的话，
+  `/api/session/list` 会因 `session source headers conflict` 整体报错、侧栏全空，直到重启 DSH
+  （issue #1）。换不了内存 header 时插件**整体放弃**这次接管（`handoff-failed`），一个字节都不动。
 - **正在跑活的接管依赖私有内部结构**（`tracker.writers`、写句柄的 `header` 槽位、`enqueueChain`、
   以及注册表的 `entity.mutate`）。DSH 换 rc 版本时这些都可能变，所以每一处都 feature-detect：
   探测不到就整体放弃（`handoff-failed`），绝不半途而废。
