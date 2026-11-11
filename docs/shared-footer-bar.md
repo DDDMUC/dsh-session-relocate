@@ -92,6 +92,10 @@ body.dshsm-selecting [class*="_footArea"] > *:not([class*="_footerActions"]){dis
 /* 别家插件的页脚按钮让位 */
 body.dshsm-selecting [data-slot="sidebar.footer.action"] > [data-dsh-plugin]{display:none}
 
+/* 按钮型入口一律让位（.dhns-footer-btn 这类没带 data-dsh-plugin 的）
+   槽入口无包装层，'> button' 精确命中按钮型入口；:not([role="toolbar"]) 保证藏不到底栏自己 */
+body.dshsm-selecting [data-slot="sidebar.footer.action"] > button:not([role="toolbar"]){display:none}
+
 /* entryRow 那个容器不带 data-dsh-plugin，单独点名 */
 body.dshsm-selecting [data-slot="sidebar.footer.action"] > [class*="_entryRow"]{display:none}
 ```

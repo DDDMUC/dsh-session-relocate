@@ -1198,6 +1198,12 @@ test('样式：多选底栏只用正面选择器让位，按钮不被压扁', as
   assert.match(css, /body\.dshsm-selecting \[data-slot="sidebar\.footer\.action"\] > \[data-dsh-plugin\]\{display:none\}/);
   assert.match(css, /body\.dshsm-selecting \[data-slot="sidebar\.footer\.action"\] > \[class\*="_entryRow"\]\{display:none\}/);
   assert.match(css, /body\.dshsm-selecting \[class\*="_footArea"\] > \*:not\(\[class\*="_footerActions"\]\)\{display:none\}/);
+  assert.match(
+    css,
+    /body\.dshsm-selecting \[data-slot="sidebar\.footer\.action"\] > button:not\(\[role="toolbar"\]\)\{display:none\}/,
+    '页脚里的按钮型入口（如 dsh-sidebar-declutter 的 .dhns-footer-btn）也要让位',
+  );
+  assert.doesNotMatch(css, /\[data-slot="sidebar\.footer\.action"\] > button\{display:none\}/, '不能无条件藏 button —— 底栏自己可能就是 button');
   assert.match(css, /\.dshsm-bar-btn\{[^}]*flex:0 0 auto[^}]*white-space:nowrap/, '按钮不许被压扁/换行');
   assert.match(css, /\.dshsm-bar-count\{[^}]*flex:1/, '计数让路');
 });
