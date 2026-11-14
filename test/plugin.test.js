@@ -208,13 +208,13 @@ function routeFor(routes, suffix) {
   return found;
 }
 
-test('apply 注册 4 条桥接路由，并注入引导全局', async () => {
+test('apply 注册 5 条桥接路由，并注入引导全局', async () => {
   const fixture = makeFixture('plugin-wire', 'plugin');
   const harness = makeCtx(fixture, { bridgePrefix: '/api/test-move', sessionsRoot: fixture.sessionsRoot, journalsDir: fixture.journalsDir, home: fixture.base });
   assert.deepEqual(harness.routes.map((route) => route.path).sort(), [
-    '/api/test-move/describe', '/api/test-move/move', '/api/test-move/move-commit', '/api/test-move/status',
+    '/api/test-move/describe', '/api/test-move/move', '/api/test-move/move-commit', '/api/test-move/move-out', '/api/test-move/status',
   ]);
-  assert.deepEqual(harness.routes.map((route) => route.kind), ['exact', 'exact', 'exact', 'exact']);
+  assert.deepEqual(harness.routes.map((route) => route.kind), ['exact', 'exact', 'exact', 'exact', 'exact']);
 
   const table = [];
   harness.events.get('webserver/index-inject')(table);
@@ -533,5 +533,44 @@ test('move：live Session 拿不到 header 时放弃接管，文件一个字节�
   assert.ok(existsSync(fixture.srcDir), '源目录必须还在');
   assert.ok(!existsSync(fixture.dstDir), '目标目录不该出现');
   assert.deepEqual(readFileSync(join(fixture.srcDir, 'session.v4.jsonl.zstd')), before, '日志内容一个字节都不该变');
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
+test('move-out：只摘归属，不动日志/header，可以从目标工作区再搬回来', async () => {
+  const fixture = makeFixture('plugin-move-out', 'plugin');
+  const harness = makeCtx(fixture, { sessionsRoot: fixture.sessionsRoot, journalsDir: fixture.journalsDir, home: fixture.base });
+  const before = readFileSync(join(fixture.srcDir, 'session.v4.jsonl.zstd'));
+
+  const result = await call(routeFor(harness.routes, '/move-out'), 'POST', { sessionId: SESSION_ID });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.json.ok, true);
+  assert.equal(result.json.sessionId, SESSION_ID);
+  assert.equal(result.json.detachedFrom.id, 'ws-src', '回执要说明从哪个工作区摘的');
+  // 注册表：两个工作区都不再包含它（= 未分组）
+  for (const workspace of harness.workspaces) {
+    assert.equal(workspace.sessionIds.includes(SESSION_ID), false, '哪个工作区都不该再包含它');
+  }
+  // 文件与 header 一个字节都没动
+  assert.deepEqual(readFileSync(join(fixture.srcDir, 'session.v4.jsonl.zstd')), before, '会话日志不该被碰');
+  assert.ok(existsSync(fixture.srcDir), '目录仍在原处');
+  assert.equal(harness.calls.filter((entry) => entry[0] === 'mutate').length, 1, '只写一次注册表');
+  rmSync(fixture.base, { recursive: true, force: true });
+});
+
+test('move-out：本来就不在任何工作区时返回 already-ungrouped，不写注册表', async () => {
+  const fixture = makeFixture('plugin-move-out-idle', 'plugin');
+  const harness = makeCtx(fixture, { sessionsRoot: fixture.sessionsRoot, journalsDir: fixture.journalsDir, home: fixture.base });
+  for (const workspace of harness.workspaces) {
+    // sessionIds 是只读 getter（背后是 record），这里按真实 API 用 mutate 摘掉归属。
+    const at = workspace.sessionIds.indexOf(SESSION_ID);
+    if (at >= 0) await workspace.mutate((record) => ({ ...record, sessionIds: record.sessionIds.filter((id) => id !== SESSION_ID) }));
+  }
+  const mutationsBefore = harness.calls.filter((entry) => entry[0] === 'mutate').length;
+  const result = await call(routeFor(harness.routes, '/move-out'), 'POST', { sessionId: SESSION_ID });
+  assert.equal(result.json.ok, false);
+  assert.equal(result.json.code, 'already-ungrouped');
+  assert.equal(harness.calls.filter((entry) => entry[0] === 'mutate').length, mutationsBefore, '本来就不在分组里，不该再写注册表');
+  assert.ok(!existsSync(fixture.dstDir));
   rmSync(fixture.base, { recursive: true, force: true });
 });

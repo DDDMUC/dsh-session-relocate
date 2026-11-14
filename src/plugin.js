@@ -289,6 +289,14 @@ export function apply(ctx, config) {
     return previous;
   }
 
+  /** 删掉这个会话的投影缓存文件（归属变了要让侧栏重算）。尽力而为，失败不影响结果。 */
+  async function invalidateProjectionFile(sessionId) {
+    const file = join(home, 'storages', 'session_projcache', 'sessions', sessionId + '.json');
+    await rm(file, { force: true }).catch((error) => {
+      log('warn', '清理投影缓存失败（不影响结果）：' + String(error && error.message));
+    });
+  }
+
   function buildHost() {
     const registry = ctx.workspaceRegistry;
     return {
@@ -521,6 +529,35 @@ export function apply(ctx, config) {
           return { applied: false, reason: '批量摘除源归属失败：' + String(error && error.message) };
         }
       },
+      /**
+       * 把会话从它当前所在的工作区里摘出去（= 回到「未分组」）。
+       *
+       * 只改注册表：会话日志、header 的 cwd、投影缓存全都不动 —— 因为 cwd 没变，
+       * 随时可以再拖回原工作区（那时走 attachExisting / already-there 那条路）。
+       * 这也是 DSH 自己的模型允许的最低风险操作：未分组 = 没有任何工作区记录包含它。
+       */
+      async detachFromWorkspace(sessionId) {
+        const registry = ctx.workspaceRegistry;
+        let entities = [];
+        try {
+          entities = typeof registry.list === 'function' ? registry.list() : [];
+        } catch (error) {
+          entities = [];
+        }
+        const owner = entities.find((entity) => Array.isArray(entity.sessionIds) && entity.sessionIds.indexOf(sessionId) >= 0);
+        if (owner === undefined) return { detached: false, reason: 'already-ungrouped' };
+        if (typeof owner.mutate !== 'function') return { detached: false, reason: 'no-mutate' };
+        try {
+          await owner.mutate((record) => (Array.isArray(record.sessionIds) && record.sessionIds.includes(sessionId)
+            ? { ...record, sessionIds: record.sessionIds.filter((entry) => entry !== sessionId) }
+            : record));
+        } catch (error) {
+          return { detached: false, reason: 'mutate-failed: ' + String(error && error.message) };
+        }
+        // 归属变了：失效一次投影缓存，让侧栏按新的分组关系重算（和搬移时同一个做法）。
+        await invalidateProjectionFile(sessionId);
+        return { detached: true, from: { id: owner.id, title: owner.title } };
+      },
       async releaseSession(sessionId) {
         const sessions = ctx.get('sessions');
         if (sessions === undefined || typeof sessions.get !== 'function') {
@@ -739,6 +776,32 @@ export function apply(ctx, config) {
       return children === undefined ? { ok: true, ...receipt } : { ok: true, ...receipt, children };
     } catch (error) {
       log('warn', '迁移失败：' + String(error && error.message));
+      return failure(error);
+    }
+  }
+
+  /**
+   * 把会话移出它当前所在的工作区（回到「未分组」）。
+   *
+   * 只改注册表：不动会话日志、不动 header 里的 cwd、不碰写句柄 —— 所以
+   * **正在跑的会话也能安全移出**（文件根本没动），而且随时能再拖回原工作区。
+   */
+  async function moveOut(body) {
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+    if (sessionId.length === 0) return { ok: false, code: "bad-request", message: "缺少 sessionId" };
+    try {
+      const host = buildHost();
+      const result = await host.detachFromWorkspace(sessionId);
+      if (result === undefined || result.detached !== true) {
+        const reason = result !== undefined && typeof result.reason === "string" ? result.reason : "";
+        if (reason === "already-ungrouped") {
+          return { ok: false, code: "already-ungrouped", message: "这个对话本来就不在任何工作区里" };
+        }
+        return { ok: false, code: "detach-failed", message: "移出工作区失败：" + reason };
+      }
+      return { ok: true, sessionId, detachedFrom: { id: result.from.id, title: result.from.title } };
+    } catch (error) {
+      log("warn", "移出工作区失败：" + String(error && error.message));
       return failure(error);
     }
   }
@@ -1017,7 +1080,8 @@ export function apply(ctx, config) {
       const routes = [
         route(prefix + '/describe', ['POST'], describe),
         route(prefix + '/move', ['POST'], move),
-      route(prefix + '/move-commit', ['POST'], moveCommit),
+      route(prefix + '/move-out', ['POST'], moveOut),
+    route(prefix + '/move-commit', ['POST'], moveCommit),
         route(prefix + '/status', ['GET', 'POST'], status),
       ];
       if (selftest) {

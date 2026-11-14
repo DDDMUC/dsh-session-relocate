@@ -205,6 +205,7 @@ async function mount(routes) {
 
   let injectedSlot = null;
   let registration = null;
+  let entryRegistration = null;
   let disposer = null;
   const fakeCtx = {
     slots: {
@@ -215,11 +216,14 @@ async function mount(routes) {
       },
       register(spec, component) {
         registration = { spec, component };
+        // 菜单槽里有好几个注册（移动到 / 移出工作区 / 多选），测试固定用「移动到」那条。
+        if (spec !== null && spec !== undefined && spec.id === 'session-relocate') entryRegistration = { spec, component };
         return () => {};
       },
     },
   };
   const returned = api.apply(fakeCtx);
+  if (entryRegistration !== null) registration = entryRegistration;
 
   const fetchHarness = makeFetch(routes);
   globalThis.fetch = fetchHarness.impl;
@@ -1313,5 +1317,148 @@ test('chip：没有目录选择器时，「添加工作区…」退回手输路�
   } finally {
     if (savedPrompt === undefined) delete globalThis.prompt;
     else globalThis.prompt = savedPrompt;
+  }
+});
+
+test('拖动：拖到「未分组」组 = 移出工作区（调 /move-out，不发 /move）', async () => {
+  const harness = await mountDrag({
+    '/move-out': (body) => ({ ok: true, sessionId: body && body.sessionId, detachedFrom: { id: 'ws-src', title: '源工作区' } }),
+  });
+  const src = makeGroup('ws-src', [SESSION_ID]);
+  const ungrouped = makeGroup('', [OTHER_SESSION]);   // data-row-key="workspace:" → 未分组组
+  makeTree([src, ungrouped]);
+
+  harness.drag.onDragStart(makeEvent(rowsIn(src, 'session:')[0]));
+  assert.equal(harness.drag.state.sourceWorkspaceId, 'ws-src', '前置：源工作区');
+
+  const dropEvent = makeEvent(rowsIn(ungrouped, 'session:')[0]);
+  harness.drag.onDrop(dropEvent);
+  await flush();
+
+  assert.equal(dropEvent.propagationStopped, true, '必须吃掉官方的 drop');
+  const outs = harness.calls.filter((call) => /\/move-out$/.test(call.url));
+  assert.equal(outs.length, 1, '移出工作区走 /move-out');
+  assert.equal(outs[0].body.sessionId, SESSION_ID);
+  assert.equal(harness.calls.filter((call) => /\/move$/.test(call.url)).length, 0, '不该发 /move');
+  assert.equal(harness.drag.state.sessionId, null, '拖完要清状态');
+  delete globalThis.document;
+});
+
+test('拖动：本来就在「未分组」的行，拖回未分组组不接管（交给官方）', async () => {
+  const harness = await mountDrag({});
+  const ungrouped = makeGroup('', [SESSION_ID]);
+  makeTree([ungrouped]);
+
+  harness.drag.onDragStart(makeEvent(rowsIn(ungrouped, 'session:')[0]));
+  const dropEvent = makeEvent(rowsIn(ungrouped, 'session:')[0]);
+  harness.drag.onDrop(dropEvent);
+  await flush();
+  delete globalThis.document;
+  assert.equal(dropEvent.propagationStopped, false, '不该接管');
+  // onDragStart 可能问一次 /describe 探源工作区（本来就在未分组时拿不到），但绝不该发搬移请求。
+  const writes = harness.calls.filter((call) => /\/move(-out)?$/.test(call.url));
+  assert.equal(writes.length, 0, '一个搬移请求都不该发');
+});
+
+test('拖动：边缘自动滚动——步骤曲线（越靠边越快，2~22px）', async () => {
+  const harness = await mountDrag({});
+  assert.equal(harness.drag.scrollStepFor(0), 2, '刚进边缘最慢');
+  assert.equal(harness.drag.scrollStepFor(84), 22, '贴到边上最快');
+  assert.equal(harness.drag.scrollStepFor(999), 22, '超出不更大');
+  const near = harness.drag.scrollStepFor(60);
+  const far = harness.drag.scrollStepFor(20);
+  assert.ok(near > far, '越靠边（distance 越大）滚得越快');
+  delete globalThis.document;
+});
+
+test('拖动：自动滚动认滚动容器（不依赖 class 名），滚到底会自己停', async () => {
+  const harness = await mountDrag({});
+  const scroll = { overflowY: 'auto', scrollHeight: 900, clientHeight: 400, parentElement: null };
+  const row = { parentElement: scroll };
+  const savedStyle = globalThis.getComputedStyle;
+  globalThis.getComputedStyle = (node) => (node === scroll ? { overflowY: 'auto' } : { overflowY: 'visible' });
+
+  assert.equal(harness.drag.findScrollableAncestor(row), scroll, '应当认出可滚动的祖先');
+  assert.equal(harness.drag.findScrollableAncestor({ parentElement: null }), null, '找不到就返回 null');
+
+  // 造一个会被夹住的滚动条：滚到底再滚就不会再变
+  let top = 100;
+  const scroller = {
+    get scrollTop() { return top; },
+    set scrollTop(value) { top = Math.max(0, Math.min(1600, value)); },
+    getBoundingClientRect: () => ({ top: 0, bottom: 400, left: 0, right: 280, height: 400 }),
+  };
+  let frames = 0;
+  const savedRaf = globalThis.requestAnimationFrame;
+  const savedCancel = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = () => { frames += 1; return frames; };
+  globalThis.cancelAnimationFrame = () => {};
+
+  const state = harness.drag.state;
+  state.sessionId = SESSION_ID;
+  state.scrollEl = scroller;
+  state.pointer = { x: 100, y: 398 };          // 贴着底部边缘
+  harness.drag.autoScrollTick();
+  assert.ok(scroller.scrollTop > 100, '应当往下滚');
+  assert.equal(frames, 1, '滚动了就排下一帧');
+
+  state.pointer = { x: 100, y: 200 };          // 中间：不滚
+  const before = scroller.scrollTop;
+  harness.drag.autoScrollTick();
+  assert.equal(scroller.scrollTop, before, '不在边缘就不滚');
+  assert.equal(frames, 1, '没滚就不该排帧');
+
+  top = 1600;                                   // 到底了
+  state.pointer = { x: 100, y: 398 };
+  const atBottom = frames;
+  harness.drag.autoScrollTick();
+  assert.equal(frames, atBottom, '到底了要停，不能空转 rAF');
+
+  state.pointer = { x: 900, y: 398 };          // 指针甩出侧栏
+  top = 100;
+  const outside = frames;
+  harness.drag.autoScrollTick();
+  assert.equal(frames, outside, '指针不在侧栏里就不滚');
+
+  globalThis.getComputedStyle = savedStyle;
+  if (savedRaf === undefined) delete globalThis.requestAnimationFrame;
+  else globalThis.requestAnimationFrame = savedRaf;
+  if (savedCancel === undefined) delete globalThis.cancelAnimationFrame;
+  else globalThis.cancelAnimationFrame = savedCancel;
+  delete globalThis.document;
+});
+
+test('菜单：移出工作区入口——调 /move-out、关菜单、已未分组时给出说明', async () => {
+  const menuOpens = [];
+  const props = { sessionId: SESSION_ID, useMenuOpenState: () => [true, (open) => menuOpens.push(open)] };
+
+  const ok = await mount({
+    '/move-out': () => ({ ok: true, sessionId: SESSION_ID, detachedFrom: { id: 'ws-src', title: '源工作区' } }),
+  });
+  const tree = ok.api.__ungroupEntry(props);
+  const buttons = collectButtons(tree);
+  assert.equal(buttons.length, 1);
+  assert.equal(textOf(buttons[0]), '移出工作区（未分组）');
+  buttons[0].props.onClick();
+  await flush();
+  assert.deepEqual(menuOpens, [false], '点完要关掉菜单');
+  const outs = ok.calls.filter((call) => /\/move-out$/.test(call.url));
+  assert.equal(outs.length, 1);
+  assert.equal(outs[0].body.sessionId, SESSION_ID);
+
+  // 本来就不在工作区：给一句人话，不当成失败（toast 需要 document，这里补一个假的）
+  const { doc } = makeFakeDocument();
+  globalThis.document = doc;
+  try {
+    const already = await mount({
+      '/move-out': () => ({ ok: false, code: 'already-ungrouped', message: '这个对话本来就不在任何工作区里' }),
+    });
+    const node2 = already.api.__ungroupEntry(props);
+    collectButtons(node2)[0].props.onClick();
+    await flush();
+    assert.equal(already.calls.filter((call) => /\/move-out$/.test(call.url)).length, 1, '仍然发一次，由主机判定');
+    assert.match(doc.body.children[0].textContent, /本来就不在任何工作区/, 'toast 要说人话');
+  } finally {
+    delete globalThis.document;
   }
 });

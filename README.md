@@ -58,8 +58,14 @@ curl http://127.0.0.1:3080/api/dsh-session-relocate/status
 - 拖到目标工作区的**文件夹行**上 —— 可以；
 - 拖到它下面**任意一条会话行**上 —— 也可以；
 - 拖到分组里的空隙、或「展开其余 N 个会话」上 —— 一样可以。
+- **拖到列表上下边缘会自动滚动**（越靠边滚得越快），长侧栏也能拖到看不见的工作区。
 
 松手前，整块目标分组会亮起蓝框。
+
+**移出工作区（回到「未分组」）**：把会话拖到侧栏的「未分组」分组上，松手即移出 ——
+**只改归属**，会话日志、header 里的 cwd、写句柄全都不动，所以正在跑的会话也能安全移出，
+之后随时可以再拖（或「移动到」）回原工作区。也可以用该会话「…」菜单里的
+**移出工作区（未分组）**（侧栏还没有「未分组」分组时，这是唯一的入口）。
 
 **多选也能拖。** 在多选模式里勾好几条后，抓住其中任意一条拖到目标工作区，松手就是整批搬（逐条文件事务 + 最后一次性写归属），进度显示「正在移动 x/N…」；拖的如果是一条**没被勾中**的行，就只搬它自己。
 
@@ -237,6 +243,7 @@ POSIX 上才是会话目录里的 `session.lock`（flock）。两种情况下锁
 | --- | --- | --- |
 | POST | `<prefix>/describe` | `{ sessionId? }` → 工作区列表；带 sessionId 时额外给出 `currentWorkspaceId`、`live`、`willHandoff`（正在跑，会就地接管）、`willRelease`（空闲，会先释放）、`activity`、`canMove`、`reason`。 |
 | POST | `<prefix>/move` | `{ sessionId, targetWorkspaceId }` 或 `{ sessionId, targetPath }` → 迁移回执（`applied: 'live' \| 'pending'`、`released`、`releaseAttempts`、`handedOff`、`verification: 'full' \| 'sampled'`）。带 `deferRegistry: true` 时只做文件事务、保留迁移日志。 |
+| POST | `<prefix>/move-out` | `{ sessionId }` → 把会话从当前工作区摘出去（回到「未分组」）。**只改注册表**，不动日志 / header / 写句柄；本来就不在分组里时返回 `code: "already-ungrouped"`。 |
 | POST | `<prefix>/move-commit` | `{ sessionIds }` → 把一批 defer 过的迁移的归属一次性写进注册表（每个目标/源工作区各一次 mutate），返回逐条结果。 |
 | GET | `<prefix>/status` | 版本/配置（含 `moveLive`/`releaseLive`/`verify`/`bulkDefer`）/待收尾的迁移列表；调用时会顺带尝试恢复。 |
 | POST | `<prefix>/__selftest/create-live` | 仅 `selftest: true` 时存在。造一个「已打开 + 持有写租约」的会话（`{ workspacePath, pressure? }`）。 |
@@ -266,6 +273,11 @@ node --test
 | `scripts/drag-live-check.mjs` | 对着**你正在跑的那个 DSH** 做只读检查：分组契约在真实 DOM 上成立、拖到别组会话行被接管并高亮、拖回自己分组完全让路。它**只合成事件、绝不投放**，所以永远不会搬动任何会话。 |
 
 ## 已知限制
+
+- **「未分组」分组只在已有未分组会话时才出现**（官方 `groupByWorkspace` 里是 `if (stray.length > 0)`）。
+  侧栏还没有这个分组时，拖拽没有投放目标 —— 用「…」菜单里的 **移出工作区（未分组）**。
+- **自动滚动依赖「找得到滚动容器」**：从拖拽行向上找 `overflow-y: auto|scroll|overlay` 且内容确实超出的祖先。
+  原生拖拽期间浏览器自己不滚，所以这块是我们手动做的；找不到容器时就是「不滚」，不影响搬移本身。
 
 - **拖动搬移依赖官方的 DOM 约定**：行属性（`data-row-key="session:<id>"` / `"workspace:<workspaceId>"`）
   加上**分组结构**（官方 `renderGroup` 把每个工作区渲染成一个「恰好只含一个工作区行」的容器）。

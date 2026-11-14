@@ -218,6 +218,17 @@ header 是冻的，所以**那一轮的工具仍然用旧目录**；下次打开
 槽位组件常驻，靠返回 `null` 表示「不存在」。老宿主没有这个槽时回退自绘浮动卡片（`.dshsm-bar-float`）。
 文案一律自己插值，不把参数交给宿主 `t`。
 
+**边缘自动滚动**：拖拽期间用 rAF 自己滚（HTML5 拖拽时浏览器不帮滚）。滚动容器从拖拽行向上找
+`overflow-y: auto|scroll|overlay` 且 `scrollHeight > clientHeight + 4` 的祖先（不依赖 class 名）；
+指针进入距上下边缘 84px 时开滚，速度按比例平方曲线 2~22px/帧；指针越出滚动容器 40px 以上就停；
+滚不动（到底/到顶）就停止排帧。每滚一步用 `document.elementFromPoint` 重算一次投放目标 ——
+否则内容动了但不会再有 `dragover`，高亮会停在上一个分组上。
+
+**移出工作区（未分组）**：投放目标是「未分组」分组 —— 它的工作区行 `data-row-key` 恰好是
+`workspace:`（官方 `UNGROUPED_KEY = ''`）。松手后走 `POST /move-out`：**只改注册表**，
+日志 / `header.cwd` / 写句柄一律不碰，所以正在跑的会话也能移出，且随时能再搬回来。
+侧栏没有「未分组」分组时（没有 stray 会话）另有菜单入口「移出工作区（未分组）」，走同一条接口。
+
 **多选拖动**：dragstart 时读当前选中集合 —— 本插件的多选读 `bulkState`；`dsh-delete-session`
 的多选读它给选中行挂的 `.dsdel-check-on`（只读它的 DOM，不动它的状态）。拖的会话在选中集合里且
 不止一条时，投放走 `runBulkMove`（逐条 defer + 一次 commit），完成后发一个 `Escape` 让宿主收起
