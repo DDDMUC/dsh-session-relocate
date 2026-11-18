@@ -1496,6 +1496,7 @@ test('右键菜单：「移动到」注册成 contextMenus 的 session 子菜单
   const contributed = [];
   const effects = [];
   let slotEntryRegistered = false;
+  const iconKeys = [];
   const routes = {
     '/describe': () => ({
       ok: true,
@@ -1517,8 +1518,16 @@ test('右键菜单：「移动到」注册成 contextMenus 的 session 子菜单
     },
     effect(fn, label) { effects.push(label); return fn(); },
     slots: {
-      inject(slot, factory) { const d = factory(); return typeof d === 'function' ? d : () => {}; },
-      register(spec) { if (spec !== null && spec.id === 'session-relocate') slotEntryRegistered = true; return () => {}; },
+      inject(slot, factory) {
+        iconKeys.push(slot);
+        const d = factory();
+        return typeof d === 'function' ? d : () => {};
+      },
+      register(spec) {
+        if (spec !== null && spec.id === 'session-relocate') slotEntryRegistered = true;
+        if (spec !== null && spec.name === 'contextMenu.icon') iconKeys.push('icon:' + spec.key);
+        return () => {};
+      },
     },
   };
   const fetchHarness = makeFetch(routes);
@@ -1539,10 +1548,16 @@ test('右键菜单：「移动到」注册成 contextMenus 的 session 子菜单
   assert.equal(typeof contribution.resolve, 'function');
   assert.equal(slotEntryRegistered, false, '有 contextMenus 时不该再往槽里注册一份（否则同一个菜单出现两次「移动到」）');
 
+  // 图标：右键菜单按 action.icon.key 去 contextMenu.icon 槽查，必须注册那条 keyed 条目
+  assert.equal(iconKeys.includes('icon:session-relocate.move'), true, '必须注册 contextMenu.icon 的 keyed 条目，否则行首空白');
+  assert.equal(iconKeys.includes('contextMenu.icon'), true);
+
   const actions = await contribution.resolve({ sessionId: SESSION_ID }, { aborted: false });
   assert.equal(actions.length, 1, '一个父项');
   const parent = actions[0];
   assert.equal(parent.label, '移动到');
+  assert.equal(parent.icon === undefined, false, '父项必须带 icon.key（否则右键行首没有图标）');
+  assert.equal(parent.icon.key, 'session-relocate.move');
   assert.equal(parent.children === undefined, false, '必须是子菜单（children），不是行内展开');
   assert.deepEqual(parent.children.map((child) => textOf(child.label)), ['B', '未分组'], '当前工作区不列出，末尾是「未分组」');
   assert.equal(parent.children.every((child) => typeof child.run === 'function'), true, '每个子项都能执行');
