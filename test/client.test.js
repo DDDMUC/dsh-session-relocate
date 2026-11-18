@@ -194,7 +194,12 @@ test('chip：选了当前工作区不发请求；没有官方 Menu 时不声称�
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-/** 把一个 bundle 挂起来，返回渲染器与调用记录。 */
+/**
+ * 把一个 bundle 挂起来，返回右键菜单贡献项与调用记录。
+ *
+ * 「移动到」只有一个入口：注册给 contextMenus（target=session）的那个贡献项 ——
+ * 和官方「在应用中打开」同一套机制，不再有槽里的行内版本。
+ */
 async function mount(routes) {
   const entry = await loadBundle();
   const react = makeReact();
@@ -203,27 +208,23 @@ async function mount(routes) {
     throw new Error('unexpected require: ' + name);
   });
 
-  let injectedSlot = null;
-  let registration = null;
-  let entryRegistration = null;
-  let disposer = null;
+  const contributions = [];
+  const slotRegistrations = [];
   const fakeCtx = {
+    // inject 里声明了 contextMenus：Cordis 会等它就绪再 apply，所以这里一定是真对象。
+    contextMenus: {
+      register(input) { contributions.push(input); return () => {}; },
+    },
+    effect(fn) { return fn(); },
     slots: {
       inject(slot, factory) {
-        injectedSlot = slot;
-        disposer = factory();
-        return disposer;
+        const disposer = factory();
+        return typeof disposer === 'function' ? disposer : () => {};
       },
-      register(spec, component) {
-        registration = { spec, component };
-        // 菜单槽里有好几个注册（移动到 / 移出工作区 / 多选），测试固定用「移动到」那条。
-        if (spec !== null && spec !== undefined && spec.id === 'session-relocate') entryRegistration = { spec, component };
-        return () => {};
-      },
+      register(spec, component) { slotRegistrations.push({ spec, component }); return () => {}; },
     },
   };
   const returned = api.apply(fakeCtx);
-  if (entryRegistration !== null) registration = entryRegistration;
 
   const fetchHarness = makeFetch(routes);
   globalThis.fetch = fetchHarness.impl;
@@ -231,24 +232,31 @@ async function mount(routes) {
   // Node 25 的 globalThis.navigator 是只读 getter，必须用 defineProperty 覆盖。
   Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true });
 
-  const menuOpens = [];
-  const props = {
-    sessionId: SESSION_ID,
-    displayTitle: '演示对话',
-    useMenuOpenState: () => [true, (open) => menuOpens.push(open)],
+  const props = { sessionId: SESSION_ID, displayTitle: '演示对话' };
+  const contribution = () => {
+    assert.equal(contributions.length, 1, '应当向 contextMenus 贡献一项');
+    return contributions[0];
   };
+  /** resolve 一次，拿到菜单里的父项（可能是 undefined = 这一项不出现）。 */
+  const resolveParent = async (value) => {
+    const actions = await contribution().resolve(value === undefined ? { sessionId: props.sessionId } : value, { aborted: false });
+    return actions.length === 0 ? null : actions[0];
+  };
+  /** 子菜单里的可点项：等价于「鼠标悬停在父项上展开」。 */
+  const childrenOf = (parent) => (parent === null || parent.children === undefined ? [] : parent.children);
 
-  const render = () => {
-    react.reset();
-    return registration.component(props);
+  return {
+    api, entry, fakeCtx, contributions, slotRegistrations, returned, props,
+    contribution, resolveParent, childrenOf,
+    calls: fetchHarness.calls,
   };
-  const renderApi = () => {
-    const saved = globalThis.fetch;
-    globalThis.fetch = () => { throw new Error('rendering must not fetch'); };
-    try { return api.__entry(props); } finally { globalThis.fetch = saved; }
-  };
+}
 
-  return { api, entry, fakeCtx, injectedSlot, registration, returned, props, render, renderApi, calls: fetchHarness.calls, menuOpens, buttons: (tree) => collectButtons(tree) };
+/** 装上自绘 toast 需要的假 document，并返回它追加过的节点（用来看提示文案）。 */
+function withToastDocument() {
+  const { doc } = makeFakeDocument();
+  globalThis.document = doc;
+  return { doc, lastText: () => { const nodes = doc.body.children.filter((node) => node.textContent !== ''); return nodes.length === 0 ? '' : nodes[nodes.length - 1].textContent; } };
 }
 
 test('兼容：主机侧还注入旧引导全局名时，客户端照样用它的前缀（改名过渡期）', async () => {
@@ -258,83 +266,85 @@ test('兼容：主机侧还注入旧引导全局名时，客户端照样用它�
   // mount() 默认给的是新名字；这里模拟「主机侧还没重启、只有旧名字」的那半截状态。
   delete globalThis.__DSH_SESSION_RELOCATE__;
   globalThis.__DSH_SESSION_MOVE__ = { prefix: '/api/legacy-move' };
-  harness.buttons(harness.render())[0].props.onClick();
-  await flush();
+  await harness.resolveParent();
   assert.equal(harness.calls[0].url, '/api/legacy-move/describe', '应当用旧引导全局里的前缀，而不是新默认值');
   delete globalThis.__DSH_SESSION_MOVE__;
 });
 
-test('bundle 形状：id/工厂/导出与 slot 注册都对', async () => {
+test('bundle 形状：id/工厂/inject/右键贡献项都对', async () => {
   const harness = await mount({});
   assert.equal(harness.entry.id, 'dsh-session-relocate');
   assert.equal(typeof harness.entry.factory, 'function');
-  assert.deepEqual(harness.api.inject, ['slots']);
-  assert.equal(harness.injectedSlot, 'sidebar.workspaces.session.menu.item');
-  assert.deepEqual(harness.registration.spec, {
-    name: 'sidebar.workspaces.session.menu.item', id: 'session-relocate', order: 350,
-  });
-  assert.equal(typeof harness.registration.component, 'function');
+  // 和 open-in-app 一样：contextMenus 写在 inject 里，靠 Cordis 保证就绪，不用 ctx.get 探测。
+  assert.deepEqual(harness.api.inject, ['slots', 'contextMenus']);
   assert.equal(typeof harness.returned, 'function', 'apply 应当返回 disposer');
 });
 
-test('idle：只渲染一个可点的菜单项', async () => {
-  const harness = await mount({});
-  const buttons = harness.buttons(harness.render());
-  assert.equal(buttons.length, 1);
-  assert.equal(buttons[0].props.role, 'menuitem');
-  assert.equal(buttons[0].props.type, 'button');
-  assert.equal(buttons[0].props.disabled, undefined);
-  assert.equal(textOf(buttons[0]), '移动到');
-});
-
-test('点击后列出其它工作区（排除当前所在的），并可选中执行', async () => {
+test('菜单：注册成 contextMenus 的 session 子菜单（和「在应用中打开」同一形态）', async () => {
   const harness = await mount({
     '/describe': () => ({
       ok: true,
+      session: { id: SESSION_ID, canMove: true, reason: null, currentWorkspaceId: 'ws-a' },
       workspaces: [
         { id: 'ws-a', title: '工作区 A', path: 'E:\\A', current: true },
-        { id: 'ws-b', title: '工作区 B', path: 'E:\\B', current: false },
+        { id: 'ws-b', title: '工作区 B', path: 'E:\\B' },
         { id: 'ws-c', title: '工作区 C', path: 'E:\\C' },
       ],
+    }),
+  });
+  const contribution = harness.contribution();
+  assert.equal(contribution.target, 'session', '挂在会话右键菜单上（和「在应用中打开」同一个 target）');
+  assert.equal(contribution.id, 'session-relocate.move-out-menu');
+  // 官方右键项顺序：pin 100 / rename 200 / fork 300 / 复制 Session ID 450 / 在应用中打开 500 / 归档 600。
+  assert.equal(contribution.order, 550, '必须落在「在应用中打开」(500) 与「归档」(600) 之间');
+  assert.equal(typeof contribution.resolve, 'function');
+
+  const parent = await harness.resolveParent();
+  assert.equal(parent.label, '移动到');
+  assert.equal(parent.icon === undefined, false, '父项必须带 icon.key（否则右键行首没有图标）');
+  assert.equal(parent.icon.key, 'session-relocate.move');
+  assert.equal(parent.children === undefined, false, '必须是子菜单（children），不是行内展开');
+
+  const children = harness.childrenOf(parent);
+  const labels = children.map((child) => (typeof child.label === 'string' ? child.label : textOf(child.label)));
+  assert.deepEqual(labels, ['工作区 B', '工作区 C', '其它目录…', '未分组'], '当前工作区不列；末尾是「其它目录…」和「未分组」');
+  assert.equal(children.every((child) => typeof child.run === 'function'), true, '每个子项都能执行');
+});
+
+test('菜单：槽里不再注册「移动到」（否则同一个菜单出现两次）', async () => {
+  const harness = await mount({});
+  const ids = harness.slotRegistrations.map((entry) => entry.spec.id);
+  assert.equal(ids.includes('session-relocate'), false, '行内那套已经删掉，只剩右键子菜单');
+  assert.equal(ids.includes('session-relocate-bulk'), true, '「多选」入口仍然留在槽里');
+});
+
+test('菜单：选目标工作区就发 /move，并弹提示', async () => {
+  const harness = await mount({
+    '/describe': () => ({
+      ok: true,
       session: { id: SESSION_ID, canMove: true, reason: null, currentWorkspaceId: 'ws-a' },
+      workspaces: [
+        { id: 'ws-a', title: '工作区 A', path: 'E:\\A', current: true },
+        { id: 'ws-b', title: '工作区 B', path: 'E:\\B' },
+      ],
     }),
     '/move': (body) => ({ ok: true, applied: 'live', targetTitle: '工作区 B', sessionId: body.sessionId }),
   });
-
-  harness.buttons(harness.render())[0].props.onClick();
+  const toast = withToastDocument();
+  const parent = await harness.resolveParent();
+  const target = harness.childrenOf(parent)[0];
+  assert.equal(target.id, 'ws:ws-b');
+  target.run();
   await flush();
-
-  const picking = harness.buttons(harness.render());
-  const texts = picking.map(textOf);
-  assert.equal(texts.some((entry) => entry.includes('工作区 A')), false, '当前工作区不该出现在候选里');
-  assert.ok(texts.some((entry) => entry.includes('工作区 B')));
-  assert.ok(texts.some((entry) => entry.includes('工作区 C')));
-  assert.ok(texts.some((entry) => entry.includes('其它目录')));
-
-  assert.deepEqual(harness.calls[0], { url: PREFIX + '/describe', body: { sessionId: SESSION_ID } });
-  assert.equal(harness.calls[0].url.startsWith(PREFIX), true, '应当使用主机下发的桥接前缀');
-
-  const targetIndex = textingIndex(picking, '工作区 B');
-  picking[targetIndex].props.onClick();
-  await flush();
-
   assert.deepEqual(harness.calls[1], {
     url: PREFIX + '/move',
     body: { sessionId: SESSION_ID, targetWorkspaceId: 'ws-b' },
   });
-  const done = harness.buttons(harness.render());
-  assert.match(textOf(done[0]), /已移动.*工作区 B/);
-  assert.deepEqual(harness.menuOpens, [false], '成功后应当关掉菜单');
+  assert.match(toast.lastText(), /已移动.*工作区 B/);
+  assert.deepEqual(harness.calls[0], { url: PREFIX + '/describe', body: { sessionId: SESSION_ID } });
 });
 
-function textingIndex(buttons, needle) {
-  for (let i = 0; i < buttons.length; i++) {
-    if (textOf(buttons[i]).includes(needle)) return i;
-  }
-  throw new Error('找不到按钮：' + needle);
-}
-
-test('不可移动时显示原因（disabled），且不会调 move', async () => {
+test('菜单：不可移动时父项置灰（disabled），且不会调 move', async () => {
   const harness = await mount({
     '/describe': () => ({
       ok: true,
@@ -342,67 +352,85 @@ test('不可移动时显示原因（disabled），且不会调 move', async () =
       session: { id: SESSION_ID, canMove: false, reason: '这个对话当前正打开着，请先切到别的对话再移动', live: true },
     }),
   });
-  harness.buttons(harness.render())[0].props.onClick();
-  await flush();
-  const buttons = harness.buttons(harness.render());
-  assert.equal(buttons.length, 1);
-  assert.equal(buttons[0].props.disabled, true);
-  assert.match(textOf(buttons[0]), /正打开着/);
+  const parent = await harness.resolveParent();
+  assert.equal(parent.disabled, true);
+  assert.equal(parent.label, '移动到');
+  assert.equal(parent.children, undefined, '不能搬就不要给子菜单');
   assert.equal(harness.calls.length, 1, '只应当有 describe 这一次请求');
 });
 
-test('选择其它目录时用 prompt 的路径调 move', async () => {
+test('菜单：「其它目录…」用 prompt 的路径调 move', async () => {
   const harness = await mount({
     '/describe': () => ({ ok: true, workspaces: [], session: { id: SESSION_ID, canMove: true, reason: null } }),
     '/move': () => ({ ok: true, applied: 'live', targetTitle: '新目录' }),
   });
+  const toast = withToastDocument();
+  globalThis.__DSH_DIRECTORY_PICKER__ = undefined;
   globalThis.prompt = () => '  D:\\示例\\新目录  ';
-  harness.buttons(harness.render())[0].props.onClick();
-  await flush();
-  const picking = harness.buttons(harness.render());
-  picking[textingIndex(picking, '其它目录')].props.onClick();
+  const parent = await harness.resolveParent();
+  const choose = harness.childrenOf(parent).find((child) => child.id === 'choose-dir');
+  assert.ok(choose !== undefined, '必须有一项「其它目录…」');
+  assert.equal(typeof choose.label, 'string');
+  choose.run();
   await flush();
   assert.deepEqual(harness.calls[1].body, { sessionId: SESSION_ID, targetPath: 'D:\\示例\\新目录' });
+  assert.match(toast.lastText(), /已移动.*新目录/);
 });
 
-test('prompt 被取消时什么都不做', async () => {
+test('菜单：prompt 被取消时什么都不做', async () => {
   const harness = await mount({
     '/describe': () => ({ ok: true, workspaces: [], session: { id: SESSION_ID, canMove: true, reason: null } }),
   });
+  withToastDocument();
   globalThis.prompt = () => null;
-  harness.buttons(harness.render())[0].props.onClick();
-  await flush();
-  const picking = harness.buttons(harness.render());
-  picking[textingIndex(picking, '其它目录')].props.onClick();
+  const parent = await harness.resolveParent();
+  harness.childrenOf(parent).find((child) => child.id === 'choose-dir').run();
   await flush();
   assert.equal(harness.calls.length, 1, '取消 prompt 不应该发起 move');
 });
 
-test('收尾待补时给出明确提示；桥接报错时显示失败原因', async () => {
+test('菜单：「未分组」走 /move-out（只摘归属，不发 /move）', async () => {
+  const harness = await mount({
+    '/describe': () => ({
+      ok: true,
+      session: { id: SESSION_ID, canMove: true, reason: null, currentWorkspaceId: 'ws-a' },
+      workspaces: [{ id: 'ws-a', title: 'A', path: 'E:\\A', current: true }],
+    }),
+    '/move-out': () => ({ ok: true, sessionId: SESSION_ID, detachedFrom: { id: 'ws-a', title: 'A' } }),
+  });
+  const toast = withToastDocument();
+  const parent = await harness.resolveParent();
+  const ungroup = harness.childrenOf(parent).find((child) => child.id === 'ungroup');
+  assert.equal(ungroup.label, '未分组', '只有三个字，没有括号没有其它字，也没有图标');
+  assert.equal(ungroup.icon, undefined);
+  ungroup.run();
+  await flush();
+  const outs = harness.calls.filter((call) => /\/move-out$/.test(call.url));
+  assert.equal(outs.length, 1);
+  assert.equal(outs[0].body.sessionId, SESSION_ID);
+  assert.equal(harness.calls.filter((call) => /\/move$/.test(call.url)).length, 0, '不该发 /move');
+  assert.match(toast.lastText(), /已移出/);
+});
+
+test('菜单：收尾待补时给出明确提示；桥接报错时显示失败原因', async () => {
   const oneTarget = [{ id: 'ws-b', title: '工作区 B', path: 'E:\\B' }];
   const pending = await mount({
     '/describe': () => ({ ok: true, workspaces: oneTarget, session: { id: SESSION_ID, canMove: true, reason: null } }),
     '/move': () => ({ ok: true, applied: 'pending', targetTitle: '工作区 B' }),
   });
-  pending.buttons(pending.render())[0].props.onClick();
+  const pendingToast = withToastDocument();
+  pending.childrenOf(await pending.resolveParent())[0].run();
   await flush();
-  const pendingPicking = pending.buttons(pending.render());
-  pendingPicking[textingIndex(pendingPicking, '工作区 B')].props.onClick();
-  await flush();
-  assert.match(textOf(pending.buttons(pending.render())[0]), /下次启动 DSH 时自动补齐/);
+  assert.match(pendingToast.lastText(), /下次启动 DSH 时自动补齐/);
 
   const failed = await mount({
     '/describe': () => ({ ok: true, workspaces: oneTarget, session: { id: SESSION_ID, canMove: true, reason: null } }),
     '/move': () => ({ ok: false, code: 'session-live', message: '这个对话当前正打开着' }),
   });
-  failed.buttons(failed.render())[0].props.onClick();
+  const failedToast = withToastDocument();
+  failed.childrenOf(await failed.resolveParent())[0].run();
   await flush();
-  const failedPicking = failed.buttons(failed.render());
-  failedPicking[textingIndex(failedPicking, '工作区 B')].props.onClick();
-  await flush();
-  const tree = failed.buttons(failed.render())[0];
-  assert.equal(tree.props.disabled, true);
-  assert.match(textOf(tree), /移动失败.*正打开着/);
+  assert.match(failedToast.lastText(), /移动失败.*正打开着/);
 });
 
 // ── 拖动搬移 ────────────────────────────────────────────────────────────────
@@ -1428,171 +1456,3 @@ test('拖动：自动滚动认滚动容器（不依赖 class 名），滚到底�
   delete globalThis.document;
 });
 
-test('菜单：不再单独占一行——「移出工作区」并进「移动到」面板', async () => {
-  const harness = await mount({
-    '/describe': () => ({
-      ok: true,
-      session: { id: SESSION_ID, canMove: true, reason: null, currentWorkspaceId: 'ws-a' },
-      // 真机里 payload 会给当前工作区打 current: true，目标列表据此排除它
-      workspaces: [
-        { id: 'ws-a', title: 'A', path: 'E:\\A', current: true },
-        { id: 'ws-b', title: 'B', path: 'E:\\B' },
-      ],
-    }),
-    '/move-out': () => ({ ok: true, sessionId: SESSION_ID, detachedFrom: { id: 'ws-a', title: 'A' } }),
-  });
-
-  // idle 只有一行「移动到」——菜单里不该再出现第二个入口
-  const idle = harness.render();
-  assert.equal(textOf(collectButtons(idle)[0]), '移动到');
-
-  collectButtons(idle)[0].props.onClick();
-  await flush();
-  const picking = harness.render();
-  const buttons = collectButtons(picking);
-  // 标题 + 目标 B + 其它目录… + 移出工作区
-  assert.deepEqual(buttons.map((b) => textOf(b).split('E:')[0]), ['移动到：', 'B', '其它目录…', '未分组'], '最后一项就叫「未分组」');
-  const ungroup = buttons[buttons.length - 1];
-  assert.equal(textOf(ungroup), '未分组', '只有三个字，没有括号没有其它字');
-  assert.equal(ungroup.children.length, 1, '纯文字：不带图标');
-  assert.match(ungroup.props.className, /dshsm-item/);
-  assert.doesNotMatch(ungroup.props.className, /dshsm-row/, '不带图标列');
-
-  ungroup.props.onClick();
-  await flush();
-  const outs = harness.calls.filter((call) => /\/move-out$/.test(call.url));
-  assert.equal(outs.length, 1, '移出工作区走 /move-out');
-  assert.equal(outs[0].body.sessionId, SESSION_ID);
-  assert.equal(harness.calls.filter((call) => /\/move$/.test(call.url)).length, 0, '不该发 /move');
-
-  const done = harness.render();
-  assert.match(textOf(collectButtons(done)[0]), /已移出/, '完成态要回话');
-});
-
-test('菜单：本来就在「未分组」的会话，面板里不出现「移出工作区」', async () => {
-  const harness = await mount({
-    '/describe': () => ({
-      ok: true,
-      // 没有 currentWorkspaceId = 未分组
-      session: { id: SESSION_ID, canMove: true, reason: null },
-      workspaces: [{ id: 'ws-a', title: 'A', path: 'E:\\A' }],
-    }),
-  });
-  collectButtons(harness.render())[0].props.onClick();
-  await flush();
-  const buttons = collectButtons(harness.render());
-  assert.equal(buttons.map(textOf).some((label) => label === '未分组'), false, '没得移出就不该出现这一项');
-});
-
-
-test('右键菜单：「移动到」注册成 contextMenus 的 session 子菜单（和「在应用中打开」同一形态）', async () => {
-  const entry = await loadBundle();
-  const react = makeReact();
-  const api = entry.factory((name) => {
-    if (name === 'react') return react;
-    throw new Error('unexpected require: ' + name);
-  });
-
-  const contributed = [];
-  const effects = [];
-  let slotEntryRegistered = false;
-  const iconKeys = [];
-  const routes = {
-    '/describe': () => ({
-      ok: true,
-      session: { id: SESSION_ID, canMove: true, reason: null, currentWorkspaceId: 'ws-a' },
-      workspaces: [
-        { id: 'ws-a', title: 'A', path: 'E:\\A', current: true },
-        { id: 'ws-b', title: 'B', path: 'E:\\B' },
-      ],
-    }),
-    '/move': () => ({ ok: true, applied: 'live', targetTitle: 'B' }),
-    '/move-out': () => ({ ok: true, detachedFrom: { id: 'ws-a', title: 'A' } }),
-  };
-  const fakeCtx = {
-    get(name) {
-      if (name === 'contextMenus') return {
-        register(input) { contributed.push(input); return () => {}; },
-      };
-      return undefined;
-    },
-    effect(fn, label) { effects.push(label); return fn(); },
-    slots: {
-      inject(slot, factory) {
-        iconKeys.push(slot);
-        const d = factory();
-        return typeof d === 'function' ? d : () => {};
-      },
-      register(spec) {
-        if (spec !== null && spec.id === 'session-relocate') slotEntryRegistered = true;
-        if (spec !== null && spec.name === 'contextMenu.icon') iconKeys.push('icon:' + spec.key);
-        return () => {};
-      },
-    },
-  };
-  const fetchHarness = makeFetch(routes);
-  globalThis.fetch = fetchHarness.impl;
-  globalThis.__DSH_SESSION_RELOCATE__ = { prefix: PREFIX };
-  Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true });
-
-  api.apply(fakeCtx);
-
-  assert.equal(contributed.length, 1, '应当向 contextMenus 贡献一项');
-  const contribution = contributed[0];
-  assert.equal(contribution.target, 'session', '挂在会话右键菜单上（和「在应用中打开」同一个 target）');
-  assert.equal(contribution.id, 'session-relocate.move-out-menu');
-  // 官方右键项的顺序：pin 100 / rename 200 / fork 300 / 复制 Session ID 450 / 在应用中打开 500 / 归档 600。
-  // 550 落在「在应用中打开」与「归档」之间 —— 这正是它在左键菜单里的位置。
-  assert.equal(contribution.order, 550, 'order 必须落在 500 与 600 之间，不能跑到「复制 Session ID」上面');
-  assert.ok(contribution.order > 500 && contribution.order < 600);
-  assert.equal(typeof contribution.resolve, 'function');
-  assert.equal(slotEntryRegistered, false, '有 contextMenus 时不该再往槽里注册一份（否则同一个菜单出现两次「移动到」）');
-
-  // 图标：右键菜单按 action.icon.key 去 contextMenu.icon 槽查，必须注册那条 keyed 条目
-  assert.equal(iconKeys.includes('icon:session-relocate.move'), true, '必须注册 contextMenu.icon 的 keyed 条目，否则行首空白');
-  assert.equal(iconKeys.includes('contextMenu.icon'), true);
-
-  const actions = await contribution.resolve({ sessionId: SESSION_ID }, { aborted: false });
-  assert.equal(actions.length, 1, '一个父项');
-  const parent = actions[0];
-  assert.equal(parent.label, '移动到');
-  assert.equal(parent.icon === undefined, false, '父项必须带 icon.key（否则右键行首没有图标）');
-  assert.equal(parent.icon.key, 'session-relocate.move');
-  assert.equal(parent.children === undefined, false, '必须是子菜单（children），不是行内展开');
-  assert.deepEqual(parent.children.map((child) => textOf(child.label)), ['B', '未分组'], '当前工作区不列出，末尾是「未分组」');
-  assert.equal(parent.children.every((child) => typeof child.run === 'function'), true, '每个子项都能执行');
-
-  // 点「B」→ /move
-  parent.children[0].run();
-  await flush();
-  const moveCalls = fetchHarness.calls.filter((call) => /\/move$/.test(call.url));
-  assert.equal(moveCalls.length, 1);
-  assert.equal(moveCalls[0].body.targetWorkspaceId, 'ws-b');
-
-  // 点「未分组」→ /move-out
-  parent.children[1].run();
-  await flush();
-  assert.equal(fetchHarness.calls.filter((call) => /\/move-out$/.test(call.url)).length, 1);
-
-  // describe 失败 / 取消（signal 已 abort）→ 什么都不给
-  assert.deepEqual(await contribution.resolve({}, { aborted: false }), []);
-});
-
-test('右键菜单：没有 contextMenus 服务（老宿主）时，退回到槽里的行内「移动到」', async () => {
-  const entry = await loadBundle();
-  const react = makeReact();
-  const api = entry.factory((name) => {
-    if (name === 'react') return react;
-    throw new Error('unexpected require: ' + name);
-  });
-  let slotEntryRegistered = false;
-  const fakeCtx = {
-    get() { return undefined; },
-    slots: {
-      inject(slot, factory) { const d = factory(); return typeof d === 'function' ? d : () => {}; },
-      register(spec) { if (spec !== null && spec.id === 'session-relocate') slotEntryRegistered = true; return () => {}; },
-    },
-  };
-  api.apply(fakeCtx);
-  assert.equal(slotEntryRegistered, true, '没有 contextMenus 时必须保留槽里的那份');
-});
