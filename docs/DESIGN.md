@@ -231,6 +231,13 @@ header 是冻的，所以**那一轮的工具仍然用旧目录**；下次打开
 （**不再单独占一行菜单**：同一个「移动到」面板里既能选目标工作区，也能选最后那一项 **未分组**
 —— 和其它目标一样是纯文字、不带图标；会话本来就在未分组时不渲染这一项）。
 
+**会话菜单两套入口**：左键点「…」弹出的菜单是官方槽 `sidebar.workspaces.session.menu.item`
+（渲染 `MenuItemButton`，行内展开）；**右键**菜单由 `contextMenus` 服务渲染，条目是
+target=session 的贡献项，支持 `children` 子菜单（官方「在应用中打开」就是这种）。
+本插件有 `contextMenus` 时把「移动到」注册成**子菜单**（悬停展开，位置/样式/键盘导航全交给官方），
+并且**不再往槽里注册**那份，避免同一个菜单出现两次；没有该服务（老宿主）时才退回槽里的行内展开。
+子菜单条目由 `moveTargetActions()` 生成，选中后由 `runMenuAction()` 执行（`/move` 或 `/move-out`）。
+
 **多选拖动**：dragstart 时读当前选中集合 —— 本插件的多选读 `bulkState`；`dsh-delete-session`
 的多选读它给选中行挂的 `.dsdel-check-on`（只读它的 DOM，不动它的状态）。拖的会话在选中集合里且
 不止一条时，投放走 `runBulkMove`（逐条 defer + 一次 commit），完成后发一个 `Escape` 让宿主收起

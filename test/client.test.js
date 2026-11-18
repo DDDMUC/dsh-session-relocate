@@ -1484,3 +1484,96 @@ test('菜单：本来就在「未分组」的会话，面板里不出现「移�
   assert.equal(buttons.map(textOf).some((label) => label === '未分组'), false, '没得移出就不该出现这一项');
 });
 
+
+test('右键菜单：「移动到」注册成 contextMenus 的 session 子菜单（和「在应用中打开」同一形态）', async () => {
+  const entry = await loadBundle();
+  const react = makeReact();
+  const api = entry.factory((name) => {
+    if (name === 'react') return react;
+    throw new Error('unexpected require: ' + name);
+  });
+
+  const contributed = [];
+  const effects = [];
+  let slotEntryRegistered = false;
+  const routes = {
+    '/describe': () => ({
+      ok: true,
+      session: { id: SESSION_ID, canMove: true, reason: null, currentWorkspaceId: 'ws-a' },
+      workspaces: [
+        { id: 'ws-a', title: 'A', path: 'E:\\A', current: true },
+        { id: 'ws-b', title: 'B', path: 'E:\\B' },
+      ],
+    }),
+    '/move': () => ({ ok: true, applied: 'live', targetTitle: 'B' }),
+    '/move-out': () => ({ ok: true, detachedFrom: { id: 'ws-a', title: 'A' } }),
+  };
+  const fakeCtx = {
+    get(name) {
+      if (name === 'contextMenus') return {
+        register(input) { contributed.push(input); return () => {}; },
+      };
+      return undefined;
+    },
+    effect(fn, label) { effects.push(label); return fn(); },
+    slots: {
+      inject(slot, factory) { const d = factory(); return typeof d === 'function' ? d : () => {}; },
+      register(spec) { if (spec !== null && spec.id === 'session-relocate') slotEntryRegistered = true; return () => {}; },
+    },
+  };
+  const fetchHarness = makeFetch(routes);
+  globalThis.fetch = fetchHarness.impl;
+  globalThis.__DSH_SESSION_RELOCATE__ = { prefix: PREFIX };
+  Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true });
+
+  api.apply(fakeCtx);
+
+  assert.equal(contributed.length, 1, '应当向 contextMenus 贡献一项');
+  const contribution = contributed[0];
+  assert.equal(contribution.target, 'session', '挂在会话右键菜单上（和「在应用中打开」同一个 target）');
+  assert.equal(contribution.id, 'session-relocate.move-out-menu');
+  assert.equal(typeof contribution.resolve, 'function');
+  assert.equal(slotEntryRegistered, false, '有 contextMenus 时不该再往槽里注册一份（否则同一个菜单出现两次「移动到」）');
+
+  const actions = await contribution.resolve({ sessionId: SESSION_ID }, { aborted: false });
+  assert.equal(actions.length, 1, '一个父项');
+  const parent = actions[0];
+  assert.equal(parent.label, '移动到');
+  assert.equal(parent.children === undefined, false, '必须是子菜单（children），不是行内展开');
+  assert.deepEqual(parent.children.map((child) => textOf(child.label)), ['B', '未分组'], '当前工作区不列出，末尾是「未分组」');
+  assert.equal(parent.children.every((child) => typeof child.run === 'function'), true, '每个子项都能执行');
+
+  // 点「B」→ /move
+  parent.children[0].run();
+  await flush();
+  const moveCalls = fetchHarness.calls.filter((call) => /\/move$/.test(call.url));
+  assert.equal(moveCalls.length, 1);
+  assert.equal(moveCalls[0].body.targetWorkspaceId, 'ws-b');
+
+  // 点「未分组」→ /move-out
+  parent.children[1].run();
+  await flush();
+  assert.equal(fetchHarness.calls.filter((call) => /\/move-out$/.test(call.url)).length, 1);
+
+  // describe 失败 / 取消（signal 已 abort）→ 什么都不给
+  assert.deepEqual(await contribution.resolve({}, { aborted: false }), []);
+});
+
+test('右键菜单：没有 contextMenus 服务（老宿主）时，退回到槽里的行内「移动到」', async () => {
+  const entry = await loadBundle();
+  const react = makeReact();
+  const api = entry.factory((name) => {
+    if (name === 'react') return react;
+    throw new Error('unexpected require: ' + name);
+  });
+  let slotEntryRegistered = false;
+  const fakeCtx = {
+    get() { return undefined; },
+    slots: {
+      inject(slot, factory) { const d = factory(); return typeof d === 'function' ? d : () => {}; },
+      register(spec) { if (spec !== null && spec.id === 'session-relocate') slotEntryRegistered = true; return () => {}; },
+    },
+  };
+  api.apply(fakeCtx);
+  assert.equal(slotEntryRegistered, true, '没有 contextMenus 时必须保留槽里的那份');
+});
