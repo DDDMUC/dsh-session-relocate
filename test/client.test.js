@@ -1532,6 +1532,10 @@ test('右键菜单：「移动到」注册成 contextMenus 的 session 子菜单
   const contribution = contributed[0];
   assert.equal(contribution.target, 'session', '挂在会话右键菜单上（和「在应用中打开」同一个 target）');
   assert.equal(contribution.id, 'session-relocate.move-out-menu');
+  // 官方右键项的顺序：pin 100 / rename 200 / fork 300 / 复制 Session ID 450 / 在应用中打开 500 / 归档 600。
+  // 550 落在「在应用中打开」与「归档」之间 —— 这正是它在左键菜单里的位置。
+  assert.equal(contribution.order, 550, 'order 必须落在 500 与 600 之间，不能跑到「复制 Session ID」上面');
+  assert.ok(contribution.order > 500 && contribution.order < 600);
   assert.equal(typeof contribution.resolve, 'function');
   assert.equal(slotEntryRegistered, false, '有 contextMenus 时不该再往槽里注册一份（否则同一个菜单出现两次「移动到」）');
 
