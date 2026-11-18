@@ -1428,37 +1428,56 @@ test('拖动：自动滚动认滚动容器（不依赖 class 名），滚到底�
   delete globalThis.document;
 });
 
-test('菜单：移出工作区入口——调 /move-out、关菜单、已未分组时给出说明', async () => {
-  const menuOpens = [];
-  const props = { sessionId: SESSION_ID, useMenuOpenState: () => [true, (open) => menuOpens.push(open)] };
-
-  const ok = await mount({
-    '/move-out': () => ({ ok: true, sessionId: SESSION_ID, detachedFrom: { id: 'ws-src', title: '源工作区' } }),
+test('菜单：不再单独占一行——「移出工作区」并进「移动到」面板', async () => {
+  const harness = await mount({
+    '/describe': () => ({
+      ok: true,
+      session: { id: SESSION_ID, canMove: true, reason: null, currentWorkspaceId: 'ws-a' },
+      // 真机里 payload 会给当前工作区打 current: true，目标列表据此排除它
+      workspaces: [
+        { id: 'ws-a', title: 'A', path: 'E:\\A', current: true },
+        { id: 'ws-b', title: 'B', path: 'E:\\B' },
+      ],
+    }),
+    '/move-out': () => ({ ok: true, sessionId: SESSION_ID, detachedFrom: { id: 'ws-a', title: 'A' } }),
   });
-  const tree = ok.api.__ungroupEntry(props);
-  const buttons = collectButtons(tree);
-  assert.equal(buttons.length, 1);
-  assert.equal(textOf(buttons[0]), '移出工作区（未分组）');
-  buttons[0].props.onClick();
-  await flush();
-  assert.deepEqual(menuOpens, [false], '点完要关掉菜单');
-  const outs = ok.calls.filter((call) => /\/move-out$/.test(call.url));
-  assert.equal(outs.length, 1);
-  assert.equal(outs[0].body.sessionId, SESSION_ID);
 
-  // 本来就不在工作区：给一句人话，不当成失败（toast 需要 document，这里补一个假的）
-  const { doc } = makeFakeDocument();
-  globalThis.document = doc;
-  try {
-    const already = await mount({
-      '/move-out': () => ({ ok: false, code: 'already-ungrouped', message: '这个对话本来就不在任何工作区里' }),
-    });
-    const node2 = already.api.__ungroupEntry(props);
-    collectButtons(node2)[0].props.onClick();
-    await flush();
-    assert.equal(already.calls.filter((call) => /\/move-out$/.test(call.url)).length, 1, '仍然发一次，由主机判定');
-    assert.match(doc.body.children[0].textContent, /本来就不在任何工作区/, 'toast 要说人话');
-  } finally {
-    delete globalThis.document;
-  }
+  // idle 只有一行「移动到」——菜单里不该再出现第二个入口
+  const idle = harness.render();
+  assert.equal(textOf(collectButtons(idle)[0]), '移动到');
+
+  collectButtons(idle)[0].props.onClick();
+  await flush();
+  const picking = harness.render();
+  const buttons = collectButtons(picking);
+  // 标题 + 目标 B + 其它目录… + 移出工作区
+  assert.deepEqual(buttons.map((b) => textOf(b).split('E:')[0]), ['移动到：', 'B', '其它目录…', '移出工作区（未分组）']);
+  const ungroup = buttons[buttons.length - 1];
+  assert.match(ungroup.props.className, /dshsm-row/, '和菜单行同样的图标列');
+
+  ungroup.props.onClick();
+  await flush();
+  const outs = harness.calls.filter((call) => /\/move-out$/.test(call.url));
+  assert.equal(outs.length, 1, '移出工作区走 /move-out');
+  assert.equal(outs[0].body.sessionId, SESSION_ID);
+  assert.equal(harness.calls.filter((call) => /\/move$/.test(call.url)).length, 0, '不该发 /move');
+
+  const done = harness.render();
+  assert.match(textOf(collectButtons(done)[0]), /已移出/, '完成态要回话');
 });
+
+test('菜单：本来就在「未分组」的会话，面板里不出现「移出工作区」', async () => {
+  const harness = await mount({
+    '/describe': () => ({
+      ok: true,
+      // 没有 currentWorkspaceId = 未分组
+      session: { id: SESSION_ID, canMove: true, reason: null },
+      workspaces: [{ id: 'ws-a', title: 'A', path: 'E:\\A' }],
+    }),
+  });
+  collectButtons(harness.render())[0].props.onClick();
+  await flush();
+  const buttons = collectButtons(harness.render());
+  assert.equal(buttons.map(textOf).some((label) => /移出工作区/.test(label)), false, '没得移出就不该出现这一项');
+});
+
