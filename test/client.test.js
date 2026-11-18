@@ -1451,9 +1451,12 @@ test('菜单：不再单独占一行——「移出工作区」并进「移动�
   const picking = harness.render();
   const buttons = collectButtons(picking);
   // 标题 + 目标 B + 其它目录… + 移出工作区
-  assert.deepEqual(buttons.map((b) => textOf(b).split('E:')[0]), ['移动到：', 'B', '其它目录…', '移出工作区（未分组）']);
+  assert.deepEqual(buttons.map((b) => textOf(b).split('E:')[0]), ['移动到：', 'B', '其它目录…', '未分组'], '最后一项就叫「未分组」');
   const ungroup = buttons[buttons.length - 1];
-  assert.match(ungroup.props.className, /dshsm-row/, '和菜单行同样的图标列');
+  assert.equal(textOf(ungroup), '未分组', '只有三个字，没有括号没有其它字');
+  assert.equal(ungroup.children.length, 1, '纯文字：不带图标');
+  assert.match(ungroup.props.className, /dshsm-item/);
+  assert.doesNotMatch(ungroup.props.className, /dshsm-row/, '不带图标列');
 
   ungroup.props.onClick();
   await flush();
@@ -1478,6 +1481,6 @@ test('菜单：本来就在「未分组」的会话，面板里不出现「移�
   collectButtons(harness.render())[0].props.onClick();
   await flush();
   const buttons = collectButtons(harness.render());
-  assert.equal(buttons.map(textOf).some((label) => /移出工作区/.test(label)), false, '没得移出就不该出现这一项');
+  assert.equal(buttons.map(textOf).some((label) => label === '未分组'), false, '没得移出就不该出现这一项');
 });
 
