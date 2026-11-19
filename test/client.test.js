@@ -1456,3 +1456,389 @@ test('拖动：自动滚动认滚动容器（不依赖 class 名），滚到底�
   delete globalThis.document;
 });
 
+
+// ── 全选（工作区标题行 + 每个工作区行） ──────────────────────────────────────
+//
+// 官方结构（client-ui-workspace 的 renderGroup + ProjectRowItem）：
+//   div[role="tree"]
+//     div.groupSection
+//       span (HoverCard wrapper) → div[data-row-key="workspace:X"][role="treeitem"]
+//           子节点：slot(folder) / slot(chevron) / span.projectText / span.rowActions
+//       span (wrapper) → div[data-row-key="session:…"][role="treeitem"]
+//     （嵌套工作区是 groupSection 里的 div[role="group"]）
+// 标题行是独立的一个 div[data-sidebar-workspace-header]，含 sectionLabel / searchSlot / headerActions。
+
+/** 一个够用的 DOM：支持 querySelector(All)、类/属性/前缀选择器、insertBefore、remove、监听。 */
+function makeSelectAllDom() {
+  const listeners = new Map();
+  let observerCallback = null;
+  const observedRoots = [];
+
+  function matches(node, selector) {
+    const text = String(selector).trim();
+    if (text.length === 0) return false;
+    if (text.charAt(0) === '.') return node.classList.contains(text.slice(1));
+    const classStar = /^\[class\*=["']([^"']+)["']\]$/.exec(text);
+    if (classStar !== null) return node.className.indexOf(classStar[1]) >= 0;
+    const attrStarts = /^\[([a-zA-Z-]+)\^=["']([^"']*)["']\]$/.exec(text);
+    if (attrStarts !== null) {
+      const value = node.getAttribute(attrStarts[1]);
+      return typeof value === 'string' && value.indexOf(attrStarts[2]) === 0;
+    }
+    const role = /^\[role=["']([^"']+)["']\]$/.exec(text);
+    if (role !== null) return node.getAttribute('role') === role[1];
+    const attrEq = /^\[([a-zA-Z-]+)(?:=["']([^"']*)["'])?\]$/.exec(text);
+    if (attrEq !== null) {
+      const value = node.getAttribute(attrEq[1]);
+      if (value === null) return false;
+      return attrEq[2] === undefined ? true : value === attrEq[2];
+    }
+    return false;
+  }
+
+  function queryAll(root, selector) {
+    for (const part of String(selector).split(',')) {
+      const found = [];
+      const walk = (node) => {
+        for (const child of node.children) {
+          if (matches(child, part)) found.push(child);
+          walk(child);
+        }
+      };
+      walk(root);
+      if (found.length > 0) return found;
+    }
+    return [];
+  }
+
+  function makeEl(tag, className) {
+    const node = {
+      tagName: tag === undefined ? 'div' : tag,
+      children: [],
+      parentElement: null,
+      textContent: '',
+      style: {},
+      attributes: {},
+      handlers: new Map(),
+      classList: {
+        set: new Set(String(className === undefined ? '' : className).split(/\s+/).filter(Boolean)),
+        add(name) { this.set.add(name); },
+        remove(name) { this.set.delete(name); },
+        contains(name) { return this.set.has(name); },
+      },
+      get className() { return Array.from(this.classList.set).join(' '); },
+      set className(value) { this.classList.set = new Set(String(value).split(/\s+/).filter(Boolean)); },
+      setAttribute(name, value) { this.attributes[name] = String(value); },
+      getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; },
+      appendChild(child) {
+        if (child.parentElement !== null) child.parentElement.removeChild(child);
+        child.parentElement = this;
+        this.children.push(child);
+        return child;
+      },
+      insertBefore(child, before) {
+        if (before === undefined || before === null) return this.appendChild(child);
+        const at = this.children.indexOf(before);
+        if (at < 0) return this.appendChild(child);
+        if (child.parentElement !== null) child.parentElement.removeChild(child);
+        child.parentElement = this;
+        this.children.splice(at, 0, child);
+        return child;
+      },
+      removeChild(child) {
+        const at = this.children.indexOf(child);
+        if (at >= 0) this.children.splice(at, 1);
+        child.parentElement = null;
+      },
+      remove() { if (this.parentElement !== null) this.parentElement.removeChild(this); },
+      addEventListener(type, handler) { this.handlers.set(type, handler); },
+      get firstChild() { return this.children.length === 0 ? null : this.children[0]; },
+      querySelector(selector) {
+        const found = queryAll(this, selector);
+        return found.length === 0 ? null : found[0];
+      },
+      querySelectorAll(selector) { return queryAll(this, selector); },
+    };
+    return node;
+  }
+
+  const body = makeEl('body');
+  const head = makeEl('head');
+  const tree = makeEl('div');
+  tree.setAttribute('role', 'tree');
+  const root = makeEl('div');
+  root.appendChild(tree);
+
+  const header = makeEl('div', '_sectionHeader');
+  header.setAttribute('data-sidebar-workspace-header', '');
+  header.appendChild(makeEl('span', '_sectionLabel'));
+  header.appendChild(makeEl('span', '_searchSlot'));
+  header.appendChild(makeEl('span', '_headerActions'));
+  root.appendChild(header);
+
+  /** 一个工作区分组；extra 支持 nested（子组）与 overflow（折叠行）。 */
+  function addGroup(workspaceId, sessionIds, extra) {
+    const options = extra === undefined ? {} : extra;
+    const section = makeEl('div', '_groupSection');
+    const wrapper = makeEl('span', '_HoverCard_root');
+    const headRow = makeEl('div', '_projectRow');
+    headRow.setAttribute('data-row-key', 'workspace:' + workspaceId);
+    headRow.setAttribute('role', 'treeitem');
+    headRow.appendChild(makeEl('span', '_projectText'));
+    headRow.appendChild(makeEl('span', '_rowActions'));
+    wrapper.appendChild(headRow);
+    section.appendChild(wrapper);
+
+    const appendSessions = (into, ids) => {
+      for (const id of ids) {
+        const sw = makeEl('span');
+        const row = makeEl('div', '_sessionRow');
+        row.setAttribute('data-row-key', 'session:' + id);
+        row.setAttribute('role', 'treeitem');
+        sw.appendChild(row);
+        into.appendChild(sw);
+      }
+    };
+    appendSessions(section, sessionIds);
+
+    if (options.nested !== undefined) {
+      const nest = makeEl('div');
+      nest.setAttribute('role', 'group');
+      const outer = makeEl('div', '_groupSection');
+      const iw = makeEl('span', '_HoverCard_root');
+      const ih = makeEl('div', '_projectRow');
+      ih.setAttribute('data-row-key', 'workspace:' + options.nested.id);
+      ih.setAttribute('role', 'treeitem');
+      ih.appendChild(makeEl('span', '_projectText'));
+      ih.appendChild(makeEl('span', '_rowActions'));
+      iw.appendChild(ih);
+      outer.appendChild(iw);
+      appendSessions(outer, options.nested.sessions);
+      nest.appendChild(outer);
+      section.appendChild(nest);
+    }
+
+    if (options.overflow === true) {
+      const ow = makeEl('span');
+      const orow = makeEl('div');
+      orow.setAttribute('data-row-key', 'overflow:' + workspaceId);
+      orow.setAttribute('role', 'treeitem');
+      ow.appendChild(orow);
+      section.appendChild(ow);
+    }
+
+    tree.appendChild(section);
+    return { section, headRow, wrapper };
+  }
+
+  const doc = {
+    body,
+    head,
+    addEventListener(type, handler) { listeners.set(type, handler); },
+    removeEventListener(type) { listeners.delete(type); },
+    createElement(tag) { return makeEl(tag); },
+    querySelector(selector) {
+      const found = queryAll(root, selector);
+      return found.length === 0 ? null : found[0];
+    },
+    querySelectorAll(selector) { return queryAll(root, selector); },
+    dispatchEvent() { return true; },
+  };
+
+  /** 装一个记录回调的 MutationObserver 替身（真实浏览器里就是它驱动补装饰）。 */
+  function installObserver() {
+    globalThis.MutationObserver = class {
+      constructor(callback) { observerCallback = callback; }
+      observe(node) { observedRoots.push(node); }
+      disconnect() { observerCallback = null; }
+    };
+  }
+
+  return {
+    doc, tree, header, body, root, addGroup, makeEl, listeners, observedRoots,
+    installObserver,
+    fire(records) { if (typeof observerCallback === 'function') observerCallback(records); },
+    observerActive() { return typeof observerCallback === 'function'; },
+    groupBox(id) {
+      const row = doc.querySelector('[data-row-key="workspace:' + id + '"]');
+      return row === null ? null : row.querySelector('.dshsm-select-all');
+    },
+    headerBox() { return doc.querySelector('.dshsm-select-all-head'); },
+  };
+}
+
+async function bootSelectAll(dom) {
+  const api = await makeBulkApi();
+  globalThis.document = dom.doc;
+  installBulkGlobals();
+  return api;
+}
+
+test('全选：工作区框只含本组会话（HoverCard 包一层后仍然正确）', async () => {
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1', 'ses-2']);
+  dom.addGroup('ws-b', ['ses-3']);
+  const api = await bootSelectAll(dom);
+  api.__bulk.enterBulk();
+  api.__bulk.bulkDecorate();
+
+  const box = dom.groupBox('ws-a');
+  assert.ok(box !== null, '工作区行里应当有全选框');
+  assert.equal(box.getAttribute('role'), 'checkbox');
+  assert.deepEqual(box.__dshsmIds, ['ses-1', 'ses-2'], '只含本组会话（工作区行外面那层 HoverCard wrapper 不能让这里变空）');
+  assert.deepEqual(dom.groupBox('ws-b').__dshsmIds, ['ses-3']);
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+});
+
+test('全选：嵌套工作区（role="group"）里的会话不算进父组', async () => {
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1'], { nested: { id: 'ws-child', sessions: ['ses-9'] } });
+  const api = await bootSelectAll(dom);
+  api.__bulk.enterBulk();
+  api.__bulk.bulkDecorate();
+
+  assert.deepEqual(dom.groupBox('ws-a').__dshsmIds, ['ses-1'], '父组只含自己的会话');
+  assert.deepEqual(dom.groupBox('ws-child').__dshsmIds, ['ses-9'], '子组自己那一份');
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+});
+
+test('全选：标题行「工作区 N」全选所有会话', async () => {
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1', 'ses-2']);
+  dom.addGroup('ws-b', ['ses-3']);
+  const api = await bootSelectAll(dom);
+  api.__bulk.enterBulk();
+  api.__bulk.bulkDecorate();
+
+  const box = dom.headerBox();
+  assert.ok(box !== null, '标题行里应当有全选框');
+  assert.deepEqual(box.__dshsmIds, ['ses-1', 'ses-2', 'ses-3']);
+  box.handlers.get('click')({ stopPropagation() {}, preventDefault() {} });
+  assert.equal(api.__bulk.state.selecting, true, '点全选不该退出多选');
+  assert.deepEqual(api.__bulk.state.selected, { 'ses-1': true, 'ses-2': true, 'ses-3': true });
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+});
+
+test('全选：点一下全选本组，再点清空；组框点击要 stopPropagation', async () => {
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1', 'ses-2']);
+  const api = await bootSelectAll(dom);
+  api.__bulk.enterBulk();
+  api.__bulk.bulkDecorate();
+
+  const box = dom.groupBox('ws-a');
+  let stopped = null;
+  box.handlers.get('click')({ stopPropagation() { stopped = 'yes'; }, preventDefault() {} });
+
+  assert.equal(stopped, 'yes', '必须拦住，否则工作区行会顺带折叠/展开整组');
+  assert.deepEqual(api.__bulk.state.selected, { 'ses-1': true, 'ses-2': true }, '点一下 → 本组全选中');
+  assert.equal(box.getAttribute('aria-checked'), 'true');
+  assert.equal(box.textContent, '\u2713');
+
+  box.handlers.get('click')({ stopPropagation() {}, preventDefault() {} });
+  assert.deepEqual(api.__bulk.state.selected, {}, '再点 → 全部移出');
+  assert.equal(box.getAttribute('aria-checked'), 'false');
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+});
+
+test('全选：手动勾一个后组框变 mixed（双向同步）', async () => {
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1', 'ses-2']);
+  const api = await bootSelectAll(dom);
+  api.__bulk.enterBulk();
+  api.__bulk.bulkDecorate();
+
+  const row = dom.doc.querySelector('[data-row-key="session:ses-1"]');
+  dom.listeners.get('click')({ target: { closest: () => row }, preventDefault() {}, stopPropagation() {} });
+  await flush();
+  api.__bulk.bulkDecorate();
+
+  const box = dom.groupBox('ws-a');
+  assert.equal(box.getAttribute('aria-checked'), 'mixed', '选了一半 → mixed');
+  assert.equal(box.textContent, '\u2212', 'mixed 用减号，和圆点风格一致');
+  assert.equal(api.__bulk.state.countNode.textContent, '已选 1 个');
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+});
+
+test('全选：退出多选时框和 spacer 立刻都不在 DOM 里', async () => {
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1']);
+  const api = await bootSelectAll(dom);
+  api.__bulk.enterBulk();
+  api.__bulk.bulkDecorate();
+  assert.ok(dom.groupBox('ws-a') !== null);
+  assert.ok(dom.headerBox() !== null);
+  assert.ok(dom.doc.querySelector('.dshsm-flex-spacer') !== null, 'spacer 撑住位置');
+
+  api.__bulk.exitBulk();
+  assert.equal(dom.doc.querySelector('.dshsm-select-all'), null, '同步摘掉，不等下一帧');
+  assert.equal(dom.doc.querySelector('.dshsm-flex-spacer'), null, 'spacer 也要同步摘掉，否则行尾会抖一下');
+  assert.equal(dom.observerActive(), false, 'observer 要断开');
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+});
+
+test('全选：observer 不因自己插的节点而再次调度（忽略自己）', async () => {
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1']);
+  const api = await bootSelectAll(dom);
+  dom.installObserver();
+  api.__bulk.enterBulk();
+  await flush();
+
+  assert.equal(dom.observedRoots[0], dom.tree, '观察根应当是列表本身（不是 document：正文每个 token 都会唤醒）');
+
+  // 自己插的框/spacer 造成的变异 → 不该再调度
+  let ownScheduled = false;
+  const original = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (fn) => { ownScheduled = true; fn(); return 1; };
+  api.__bulk.state.raf = null;
+  dom.fire([{ addedNodes: [dom.groupBox('ws-a')], removedNodes: [] }]);
+  assert.equal(ownScheduled, false, '自己插的节点不该触发下一轮装饰');
+
+  // 宿主新增了一行 → 必须补装饰
+  let hostScheduled = false;
+  globalThis.requestAnimationFrame = (fn) => { hostScheduled = true; fn(); return 1; };
+  api.__bulk.state.raf = null;
+  const hostRow = dom.makeEl('div', '_sessionRow');
+  hostRow.setAttribute('data-row-key', 'session:ses-2');
+  hostRow.setAttribute('role', 'treeitem');
+  dom.fire([{ addedNodes: [hostRow], removedNodes: [] }]);
+  globalThis.requestAnimationFrame = original;
+  api.__bulk.state.raf = null;
+  assert.equal(hostScheduled, true, '宿主新增一行时应当重新装饰');
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+});
+
+test('全选：组里有折叠（overflow）时不显示 ✓，只显示 mixed', async () => {
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1'], { overflow: true });
+  const api = await bootSelectAll(dom);
+  api.__bulk.enterBulk();
+  api.__bulk.bulkDecorate();
+
+  const box = dom.groupBox('ws-a');
+  box.handlers.get('click')({ stopPropagation() {}, preventDefault() {} });
+  assert.deepEqual(api.__bulk.state.selected, { 'ses-1': true });
+  assert.equal(box.getAttribute('aria-checked'), 'mixed', '只选中看得见的那部分，不能打勾假装全选');
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+});
+
+test('全选：两个插件同时存在时，BulkEntry / BulkBar 仍返回 null（互让没被破坏）', async () => {
+  const api = await makeBulkApi();
+  const dom = makeBulkDom([]);
+  globalThis.document = dom.doc;
+  installBulkGlobals();
+  globalThis.__DSH_DELETE_SESSION__ = { supportsBulkMove: true };
+  assert.equal(api.__bulkEntry({}), null, '多选入口仍让位');
+  assert.equal(api.__bulk.BulkBar({}), null, '底栏仍让位');
+  delete globalThis.__DSH_DELETE_SESSION__;
+  delete globalThis.document;
+});
