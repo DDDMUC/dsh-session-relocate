@@ -124,6 +124,7 @@ const FAKE_PRIMITIVES = {
   Menu(props) { return { type: 'Menu', props, children: [] }; },
   IconFolderCloseRegular(props) { return { type: 'FolderIcon', props, children: [] }; },
   IconPlusOutlineRegular(props) { return { type: 'PlusIcon', props, children: [] }; },
+  MenuItemButton(props) { return { type: 'MenuItemButton', props, children: [props.children] }; },
 };
 
 test('chip：有官方 Menu 时点开就是官方那套工作区下拉（当前项画勾 + 添加工作区…）', async () => {
@@ -1087,6 +1088,30 @@ test('批量：宿主支持批量动作时，「多选」入口让位（渲染 n
   delete globalThis.document;
 });
 
+test('多选入口：有宿主基座时用 MenuItemButton 并带图标（和 dsh-delete-session 一致）', async () => {
+  // 没有图标的「多选」是裸文字：菜单里「置顶 / 分叉 / 移动到」那几行左边都有图标，
+  // 只有它空着。两个插件都装时看到的是对方那一行（有图标），单独装本插件就没有 ——
+  // 同一件控件两种样子。
+  const primitives = {
+    MenuItemButton(props) { return { type: 'MenuItemButton', props, children: [props.children] }; },
+  };
+  const entry = await loadBundle();
+  const react = makeReact();
+  const api = entry.factory((name) => {
+    if (name === 'react') return react;
+    if (name === '@deepseek-ai/dsh-client-ui-primitives') return primitives;
+    throw new Error('unexpected require: ' + name);
+  });
+  Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true });
+  delete globalThis.__DSH_DELETE_SESSION__;
+  const node = api.__bulkEntry({ useMenuOpenState: () => [true, () => {}] });
+  assert.equal(node.type, primitives.MenuItemButton, '走宿主的菜单行组件，行高/hover 才和别的行一致');
+  assert.equal(node.props.icon.type, 'svg', '必须带图标，否则这一行是裸文字');
+  assert.equal(node.props.icon.props.width, 16, '16px，和宿主菜单图标同尺寸');
+  assert.equal(node.props.icon.children.length, 4, '四条路径（两个圆点 + 两条横线）');
+  assert.equal(textOf(node), '多选', '文案不变');
+});
+
 test('批量：进入多选 → 底部条（已选 0、移动禁用）→ 点行选中 → 退出清理', async () => {
   const api = await makeBulkApi();
   const dom = makeBulkDom(['session-a', 'session-b']);
@@ -1793,12 +1818,19 @@ test('全选：observer 不因自己插的节点而再次调度（忽略自己�
 
   assert.equal(dom.observedRoots[0], dom.tree, '观察根应当是列表本身（不是 document：正文每个 token 都会唤醒）');
 
+  // 装饰是 rAF 排程的，单次 flush 不保证已经跑完 —— 框还没被创建时
+  // `groupBox()` 返回 null，这一发就变成了「null 不是自己插的节点」而误判调度，
+  // 整个用例于是随机红。这里先同步跑一趟装饰，拿到真的框再测观察器。
+  api.__bulk.bulkDecorate();
+  const ownBox = dom.groupBox('ws-a');
+  assert.ok(ownBox !== null, '被测的前提：框已经挂上');
+
   // 自己插的框/spacer 造成的变异 → 不该再调度
   let ownScheduled = false;
   const original = globalThis.requestAnimationFrame;
   globalThis.requestAnimationFrame = (fn) => { ownScheduled = true; fn(); return 1; };
   api.__bulk.state.raf = null;
-  dom.fire([{ addedNodes: [dom.groupBox('ws-a')], removedNodes: [] }]);
+  dom.fire([{ addedNodes: [ownBox], removedNodes: [] }]);
   assert.equal(ownScheduled, false, '自己插的节点不该触发下一轮装饰');
 
   // 宿主新增了一行 → 必须补装饰
@@ -1816,7 +1848,56 @@ test('全选：observer 不因自己插的节点而再次调度（忽略自己�
   delete globalThis.MutationObserver;
 });
 
-test('全选：组里有折叠（overflow）时不显示 ✓，只显示 mixed', async () => {
+test('全选：半选时再点框 → 补齐成全部选中（不是清空）', async () => {
+  // 空 → 全选，半选 → 补齐，全选 → 清空（和 dsh-delete-session 的 toggleGroup 同语义）。
+  // 本插件原来写的是 state === 'false' 才算 fill，半选时点一下把已选的全清掉。
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1', 'ses-2', 'ses-3']);
+  const api = await bootSelectAll(dom);
+  api.__bulk.enterBulk();
+  api.__bulk.bulkDecorate();
+
+  // 先手动勾一个 → 组框变 mixed
+  const row = dom.doc.querySelector('[data-row-key="session:ses-2"]');
+  dom.listeners.get('click')({ target: { closest: () => row }, preventDefault() {}, stopPropagation() {} });
+  assert.equal(dom.groupBox('ws-a').getAttribute('aria-checked'), 'mixed', '1/3 → mixed');
+
+  // 点框：补齐成 3/3，而不是把 ses-2 清掉（toggleGroup 同步，直接断言）
+  dom.groupBox('ws-a').handlers.get('click')({ stopPropagation() {}, preventDefault() {} });
+  assert.equal(api.__bulk.state.selected['ses-2'], true, '已选的不能被清掉');
+  assert.equal(api.__bulk.state.selected['ses-1'], true, '补上别的');
+  assert.equal(api.__bulk.state.selected['ses-3'], true, '补上别的');
+  assert.equal(dom.groupBox('ws-a').getAttribute('aria-checked'), 'true', '补齐后是 true');
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+})
+
+test('全选：全勾状态下再点框 → 清空', async () => {
+  const dom = makeSelectAllDom();
+  dom.addGroup('ws-a', ['ses-1', 'ses-2']);
+  const api = await bootSelectAll(dom);
+  api.__bulk.enterBulk();
+  api.__bulk.bulkDecorate();
+
+  // 先把两个都勾上（走真实的行点击，这样组框会变成 ✓）。
+  for (const id of ['ses-1', 'ses-2']) {
+    const row = dom.doc.querySelector('[data-row-key="session:' + id + '"]');
+    dom.listeners.get('click')({ target: { closest: () => row }, preventDefault() {}, stopPropagation() {} });
+  }
+  assert.equal(dom.groupBox('ws-a').getAttribute('aria-checked'), 'true', '前提：已经全勾');
+
+  // 现在点一次框 → 清空
+  dom.groupBox('ws-a').handlers.get('click')({ stopPropagation() {}, preventDefault() {} });
+  assert.equal(api.__bulk.state.selected['ses-1'], undefined, '再点 → 清空');
+  assert.equal(dom.groupBox('ws-a').getAttribute('aria-checked'), 'false', '清零后是空');
+  delete globalThis.document;
+  delete globalThis.MutationObserver;
+})
+
+test('全选：组底部有 overflow 行（收起）时，全勾仍然显示 ✓', async () => {
+  // 宿主每个组底部都有一行 `overflow:<ws>`：组展开时它写「收起」，折叠时写
+  // 「展开其余 N 个会话」。**它存在不等于有会话被藏起来**。曾经拿它当
+  // 「这组选不全」的证据，结果两个框永远显示 −，30 个全勾也打不了勾。
   const dom = makeSelectAllDom();
   dom.addGroup('ws-a', ['ses-1'], { overflow: true });
   const api = await bootSelectAll(dom);
@@ -1824,9 +1905,11 @@ test('全选：组里有折叠（overflow）时不显示 ✓，只显示 mixed',
   api.__bulk.bulkDecorate();
 
   const box = dom.groupBox('ws-a');
+  assert.ok(box !== null, '前提：框已经挂上');
   box.handlers.get('click')({ stopPropagation() {}, preventDefault() {} });
   assert.deepEqual(api.__bulk.state.selected, { 'ses-1': true });
-  assert.equal(box.getAttribute('aria-checked'), 'mixed', '只选中看得见的那部分，不能打勾假装全选');
+  assert.equal(box.getAttribute('aria-checked'), 'true', '这一组可见的都勾上了 → ✓');
+  assert.equal(box.textContent, '\u2713', '符号也是勾');
   delete globalThis.document;
   delete globalThis.MutationObserver;
 });
@@ -1842,3 +1925,22 @@ test('全选：两个插件同时存在时，BulkEntry / BulkBar 仍返回 null�
   delete globalThis.__DSH_DELETE_SESSION__;
   delete globalThis.document;
 });
+
+test('全选：框的形态和 dsh-delete-session 一致', async () => {
+  // 两个都装时本插件的入口与底栏都让位，用户看到的全选来自 dsh-delete-session；
+  // 只有单独装本插件的人才会见到这里的框。两套框必须长得一样，
+  // 否则同一个人在不同机器上会见到两种控件。
+  const api = await makeBulkApi();
+  const css = api.__ui.css();
+  assert.match(css, /\.dshsm-select-all\{[^}]*width:15px/, '15px 宽，和 dsh-delete-session 一致');
+  assert.match(css, /\.dshsm-select-all\{[^}]*height:15px/, '15px 高');
+  assert.match(css, /\.dshsm-select-all\{[^}]*min-width:15px/, 'flex 不能把它压没');
+  assert.match(css, /\.dshsm-select-all\{[^}]*border:1px solid/, '1px 描边（不是 1.5px）');
+  assert.match(css, /\.dshsm-select-all\{[^}]*border-radius:4px/, '4px 圆角方框（不是圆点）');
+  assert.match(css, /\.dshsm-select-all\{[^}]*font-size:10px/, '10px 字号');
+  // 会话行的勾选圈仍然保持圆形（和 dsh-delete-session 的 .dsdel-check 一样），
+  // 只有全选框要变成方框 —— 所以把范围限定在那条规则上。
+  const baseRule = /\.dshsm-select-all\{[^}]*\}/.exec(css);
+  assert.ok(baseRule !== null, '.dshsm-select-all 的基础规则存在');
+  assert.equal(baseRule[0].includes('border-radius:50%'), false, '全选框不是圆点');
+})
