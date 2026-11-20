@@ -1220,10 +1220,18 @@ test('设置页：连同子对话开关默认开，点一下写入关闭', async
   assert.equal(modeSetting.props.className, 'dshsm-setting', '第二块是「chip 什么时候出现」');
   const seg = modeSetting.children[1];
   assert.equal(seg.props.className, 'dshsm-seg');
-  assert.deepEqual(seg.children.map((button) => button.props['data-on']), ['true', 'false', 'false'], '默认「一直出现」');
+  assert.equal(seg.children.length, 4, '四档：一直出现 / 悬浮在那一行 / 只悬浮胶囊 / 不出现');
+  assert.deepEqual(seg.children.map((button) => button.props['data-on']), ['true', 'false', 'false', 'false'], '默认「一直出现」');
   seg.children[1].props.onClick();
   assert.equal(harness.api.__settings.chipMode(), 'hover', '点「悬浮才出现」后立即生效');
   assert.ok(writes.some((pair) => pair[0] === 'dsh-session-relocate.chipMode' && pair[1] === 'hover'), '写入 localStorage');
+  seg.children[2].props.onClick();
+  assert.equal(harness.api.__settings.chipMode(), 'hover-self', '第三档是「只悬浮胶囊才出现」');
+  assert.ok(writes.some((pair) => pair[0] === 'dsh-session-relocate.chipMode' && pair[1] === 'hover-self'), '写入 localStorage');
+  const css = harness.api.__ui.css();
+  assert.ok(css.includes('.dshsm-chip[data-mode="hover-self"]:hover'), '只悬浮胶囊本身才显形');
+  assert.ok(css.includes('.dshsm-dock:hover .dshsm-chip[data-mode="hover"]'), '整行悬浮是另一档');
+
   const star = node.children[2];
   assert.equal(star.type, 'a', '和 free-search 一样是整条链接');
   assert.equal(star.props.href, 'https://github.com/DDDMUC/dsh-session-relocate');
