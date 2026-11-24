@@ -1199,6 +1199,20 @@ test('拖动：关掉「连同子对话」后，单条搬移显式传 includeChi
   delete globalThis.document;
 });
 
+test('设置页：localStorage 读不了（隐私模式）时仍然默认开', async () => {
+  globalThis.localStorage = {
+    getItem() { throw new Error('denied') },
+    setItem() { throw new Error('denied') },
+  };
+  const harness = await mount({});
+  assert.equal(harness.api.__settings.wantChildren(), true, '读不到就按默认开，而不是按关');
+  const node = harness.api.__settings.ChildrenSetting({});
+  const toggle = node.children[0].children[1];
+  assert.equal(toggle.props['aria-checked'], 'true', '开关显示为开');
+  delete globalThis.localStorage;
+  delete globalThis.document;
+});
+
 test('设置页：连同子对话开关默认开，点一下写入关闭', async () => {
   const writes = [];
   const store = { value: null };
